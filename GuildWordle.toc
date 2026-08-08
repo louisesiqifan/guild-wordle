@@ -1,0 +1,11 @@
+## Interface: 11508
+## Title: GuildWordle
+## Notes: In-game Wordle with daily guild leaderboard
+## Author: Bonnie
+## Version: 1.0
+## X-License: MIT
+## SavedVariables: GuildWordleDB
+
+words.lua
+GuildWordle.lua
+GuildWordle_UI.lua
