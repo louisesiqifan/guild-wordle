@@ -1,0 +1,6 @@
+package-as: GuildWordle
+ignore:
+  - .github
+  - .gitignore
+  - README.md
+  - LICENSE
