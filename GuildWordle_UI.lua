@@ -83,6 +83,40 @@ sep:SetSize(1, FRAME_H - 28)
 sep:SetPoint("TOPLEFT", frame, "TOPLEFT", GAME_W, -24)
 sep:SetColorTexture(0.32, 0.32, 0.32, 1)
 
+-- ── Resize grip ───────────────────────────────────────────────────────────────
+-- The layout is fixed-pixel (not a reflowing grid), so "resizing" scales the
+-- whole frame uniformly via SetScale rather than actually changing its
+-- Width/Height. Drag distance maps to scale change; the chosen scale is
+-- saved account-wide and restored on next open.
+
+local MIN_SCALE, MAX_SCALE = 0.6, 1.3
+
+local resizeGrip = CreateFrame("Button", nil, frame)
+resizeGrip:SetSize(16, 16)
+resizeGrip:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -4, 4)
+resizeGrip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+resizeGrip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+resizeGrip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+
+resizeGrip:SetScript("OnMouseDown", function(self)
+    self.dragging = true
+    self.startX = select(1, GetCursorPosition())
+    self.startScale = frame:GetScale()
+end)
+resizeGrip:SetScript("OnMouseUp", function(self)
+    self.dragging = false
+    GuildWordleDB.settings.scale = frame:GetScale()
+end)
+resizeGrip:SetScript("OnUpdate", function(self)
+    if not self.dragging then return end
+    local x = select(1, GetCursorPosition())
+    local dx = (x - self.startX) / UIParent:GetEffectiveScale()
+    local newScale = self.startScale + dx / FRAME_W
+    if newScale < MIN_SCALE then newScale = MIN_SCALE end
+    if newScale > MAX_SCALE then newScale = MAX_SCALE end
+    frame:SetScale(newScale)
+end)
+
 -- ── Game section ─────────────────────────────────────────────────────────────
 
 -- Date label centred within game section
@@ -226,7 +260,7 @@ end
 -- Best state seen for each letter across all guesses so far (green beats
 -- yellow beats grey, matching standard Wordle keyboard behavior).
 local function RefreshKeyboard()
-    local game = GuildWordleDB.game
+    local game = GW.CurrentGame()
     local best = {}
     for i, guess in ipairs(game.guesses) do
         local res = game.results[i]
@@ -252,7 +286,6 @@ local LB_PAD = GAME_W + 10   -- content starts 10px past divider
 
 local lbTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 lbTitle:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, -32)
-lbTitle:SetText("|cffFFD700Guild Today|r")
 
 local lbSubtitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 lbSubtitle:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, -50)
@@ -308,7 +341,11 @@ end
 local function UpdateLBPanel()
     if not GuildWordleDB then return end
     local today = date("%Y%m%d")
-    local lb = GuildWordleDB.leaderboard and GuildWordleDB.leaderboard[today]
+    local guildName = GetGuildInfo("player")
+    lbTitle:SetText(guildName and ("|cffFFD700" .. guildName .. " Today|r") or "|cffFFD700No Guild|r")
+
+    local byGuild = GuildWordleDB.leaderboard and GuildWordleDB.leaderboard[GW.CurrentGuildKey()]
+    local lb = byGuild and byGuild[today]
 
     if not lb or not next(lb) then
         lbSubtitle:SetText("No results yet")
@@ -353,7 +390,7 @@ GW.OnLeaderboardUpdate = UpdateLBPanel
 local STATE_MAP = {[0]="grey", [1]="yellow", [2]="green"}
 
 local function RefreshGrid()
-    local game = GuildWordleDB.game
+    local game = GW.CurrentGame()
     for row = 1, 6 do
         for col = 1, 5 do SetTileState(tiles[row][col], "", "empty") end
     end
@@ -366,7 +403,7 @@ local function RefreshGrid()
 end
 
 local function UpdatePreview(text)
-    local game = GuildWordleDB.game
+    local game = GW.CurrentGame()
     if game.state ~= "playing" then return end
     local row = #game.guesses + 1
     if row > 6 then return end
@@ -388,7 +425,7 @@ end
 
 local function ShowGameResult(won)
     HideInputRow()
-    local game = GuildWordleDB.game
+    local game = GW.CurrentGame()
     if won then
         local msg = WIN_MSGS[#game.guesses] or "Got it!"
         statusText:SetText("|cff538d4e" .. msg .. "|r")
@@ -399,12 +436,14 @@ local function ShowGameResult(won)
 end
 
 local function RefreshUI()
+    frame:SetScale((GuildWordleDB.settings and GuildWordleDB.settings.scale) or 1)
+
     RefreshGrid()
     RefreshKeyboard()
     UpdateLBPanel()
     RefreshAutoShareChecks()
 
-    local game = GuildWordleDB.game
+    local game = GW.CurrentGame()
     dateLabel:SetText("Puzzle · " .. date("%b %d, %Y"))
 
     if game.state == "playing" then
@@ -436,9 +475,10 @@ local function DoSubmit()
         return
     end
 
-    local rowIdx = #GuildWordleDB.game.guesses
-    local res    = GuildWordleDB.game.results[rowIdx]
-    local guess  = GuildWordleDB.game.guesses[rowIdx]
+    local game   = GW.CurrentGame()
+    local rowIdx = #game.guesses
+    local res    = game.results[rowIdx]
+    local guess  = game.guesses[rowIdx]
     for col = 1, 5 do
         SetTileState(tiles[rowIdx][col], guess:sub(col,col), STATE_MAP[res[col]])
     end
