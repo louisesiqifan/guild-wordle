@@ -134,62 +134,47 @@ submitBtn:SetSize(72, 24)
 submitBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 230, ROW_Y - 2)
 submitBtn:SetText("Enter")
 
--- ── Share row (shown in place of the input row once the game is done) ────
+-- ── Auto-share checkboxes (persistent setting, always visible) ───────────
+-- Unlike a per-completion "Share" button, these reflect a standing preference:
+-- whichever channels are checked get an automatic chat post the moment the
+-- game is completed (see GW.AutoShareResult in GuildWordle.lua). State is
+-- read/written straight to GuildWordleDB.settings.autoShare.
 
-local SHARE_BTN_W = 90
+local CHECK_Y = ROW_Y - 34
 local SHARE_CHANNELS = {"GUILD", "PARTY", "RAID"}
 local SHARE_LABELS = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
 
-local shareLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-shareLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, ROW_Y)
-shareLabel:SetText("Share:")
-shareLabel:SetTextColor(0.8, 0.8, 0.8)
-shareLabel:Hide()
+local autoShareLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+autoShareLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, CHECK_Y)
+autoShareLabel:SetText("Auto-share:")
+autoShareLabel:SetTextColor(0.8, 0.8, 0.8)
 
-local shareBtns = {}
-for _, chan in ipairs(SHARE_CHANNELS) do
-    local btn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
-    btn:SetSize(SHARE_BTN_W, 24)
-    btn:SetText(SHARE_LABELS[chan])
-    btn:SetScript("OnClick", function() GW.ShareResult(chan) end)
-    btn:Hide()
-    shareBtns[chan] = btn
-end
-
-local function HideShareRow()
-    shareLabel:Hide()
-    for _, btn in pairs(shareBtns) do btn:Hide() end
-end
-
--- Only offers channels the player is currently in; Party and Raid are mutually
--- exclusive since being in a raid always satisfies IsInGroup() too.
-local function RefreshShareRow()
-    local avail = {}
-    if IsInGuild() then avail[#avail+1] = "GUILD" end
-    if IsInRaid() then
-        avail[#avail+1] = "RAID"
-    elseif IsInGroup() then
-        avail[#avail+1] = "PARTY"
-    end
-
-    if #avail == 0 then
-        HideShareRow()
-        return
-    end
-
-    shareLabel:Show()
-    local x = 14 + shareLabel:GetStringWidth() + 8
+local autoShareChecks = {}
+do
+    local x = 14 + autoShareLabel:GetStringWidth() + 10
     for _, chan in ipairs(SHARE_CHANNELS) do
-        local btn, show = shareBtns[chan], false
-        for _, a in ipairs(avail) do if a == chan then show = true end end
-        if show then
-            btn:ClearAllPoints()
-            btn:SetPoint("TOPLEFT", frame, "TOPLEFT", x, ROW_Y - 2)
-            btn:Show()
-            x = x + SHARE_BTN_W + 6
-        else
-            btn:Hide()
-        end
+        local check = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+        check:SetSize(22, 22)
+        check:SetPoint("TOPLEFT", frame, "TOPLEFT", x, CHECK_Y + 4)
+        check:SetScript("OnClick", function(self)
+            GuildWordleDB.settings.autoShare[chan] = self:GetChecked() and true or false
+        end)
+        x = x + 22
+
+        local label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        label:SetPoint("LEFT", check, "RIGHT", 2, 1)
+        label:SetText(SHARE_LABELS[chan])
+        x = x + label:GetStringWidth() + 10
+
+        autoShareChecks[chan] = check
+    end
+end
+
+local function RefreshAutoShareChecks()
+    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
+    if not autoShare then return end
+    for _, chan in ipairs(SHARE_CHANNELS) do
+        autoShareChecks[chan]:SetChecked(autoShare[chan] and true or false)
     end
 end
 
@@ -305,12 +290,12 @@ local function ShowGameResult(won)
     else
         statusText:SetText("|cffcc4444The word was: |r|cffFFFFFF" .. GW.todaysWord .. "|r")
     end
-    RefreshShareRow()
 end
 
 local function RefreshUI()
     RefreshGrid()
     UpdateLBPanel()
+    RefreshAutoShareChecks()
 
     local game = GuildWordleDB.game
     dateLabel:SetText("Puzzle · " .. date("%b %d, %Y"))
@@ -321,7 +306,6 @@ local function RefreshUI()
         inputBox:SetFocus()
         local rem = 6 - #game.guesses
         statusText:SetText("|cff888888" .. rem .. " guess" .. (rem ~= 1 and "es" or "") .. " remaining|r")
-        HideShareRow()
     else
         ShowGameResult(game.state == "won")
     end

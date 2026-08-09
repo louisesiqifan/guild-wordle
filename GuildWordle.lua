@@ -19,7 +19,7 @@ GW.TILE_COLORS = {
     grey   = {r=0.23, g=0.23, b=0.24},
 }
 
--- ── Helpers ───────────────────────────────────────────────────────────────
+-- ── Helpers ──────────────────────────────────────────────────────────────────
 
 local function GetDateString()
     return date("%Y%m%d")
@@ -137,6 +137,9 @@ local function InitDB()
     GuildWordleDB = GuildWordleDB or {}
     GuildWordleDB.leaderboard = GuildWordleDB.leaderboard or {}
     GuildWordleDB.game = GuildWordleDB.game or {}
+    GuildWordleDB.settings = GuildWordleDB.settings or {}
+    GuildWordleDB.settings.autoShare = GuildWordleDB.settings.autoShare
+        or {GUILD = false, PARTY = false, RAID = false}
 
     local today = GetDateString()
     if GuildWordleDB.game.date ~= today then
@@ -217,39 +220,49 @@ function GW.OnGameEnd(won)
     if IsInGuild() then
         GW.BroadcastKnownResults()
     end
+
+    GW.AutoShareResult()
 end
 
--- ── Manual share ──────────────────────────────────────────────────────────────
--- Unlike BroadcastKnownResults (silent addon-message leaderboard sync, which
--- always runs automatically), posting to visible chat is opt-in: the player
--- picks a channel via a UI button after the game ends.
+-- ── Auto-share ───────────────────────────────────────────────────────────────
+-- Whether a completed result is posted to visible chat is controlled by the
+-- Guild/Party/Raid checkboxes in the UI (GuildWordleDB.settings.autoShare) —
+-- checked here automatically rather than requiring a manual action each time.
 
 local function BuildShareMessage()
     local game     = GuildWordleDB.game
     local me       = UnitName("player")
     local won      = game.state == "won"
     local numGuess = #game.guesses
-    local symbols  = ResultRowsToSymbols(game.results)
 
     if won then
         local triesWord = (numGuess == 1) and "try" or "tries"
-        return string.format("[GuildWordle] %s completed today's Wordle in %d %s! %s",
-            me, numGuess, triesWord, symbols)
+        return string.format("[GuildWordle] %s completed today's Wordle in %d %s!", me, numGuess, triesWord)
     else
-        return string.format("[GuildWordle] %s gave today's Wordle their best shot but couldn't crack it (X/6). %s",
-            me, symbols)
+        return string.format("[GuildWordle] %s gave today's Wordle their best shot but couldn't crack it.", me)
     end
 end
 
-function GW.ShareResult(channel)
-    local game = GuildWordleDB.game
-    if game.state == "playing" then return end
-    if channel == "GUILD" and not IsInGuild() then return end
-    if channel == "PARTY" and not IsInGroup() then return end
-    if channel == "RAID"  and not IsInRaid()  then return end
+-- Party and Raid are mutually exclusive since being in a raid always
+-- satisfies IsInGroup() too.
+local function ChannelIsActive(channel)
+    if channel == "GUILD" then return IsInGuild() end
+    if channel == "PARTY" then return IsInGroup() and not IsInRaid() end
+    if channel == "RAID"  then return IsInRaid() end
+    return false
+end
 
-    SendChatMessage(BuildShareMessage(), channel)
-    print("|cffFFD700[GuildWordle]|r Shared to " .. channel:lower() .. "!")
+function GW.AutoShareResult()
+    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
+    if not autoShare then return end
+
+    local msg
+    for _, channel in ipairs({"GUILD", "PARTY", "RAID"}) do
+        if autoShare[channel] and ChannelIsActive(channel) then
+            msg = msg or BuildShareMessage()
+            SendChatMessage(msg, channel)
+        end
+    end
 end
 
 -- ── Addon-message sync ──────────────────────────────────────────────────────────
