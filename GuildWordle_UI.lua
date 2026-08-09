@@ -223,11 +223,21 @@ local function RefreshKeyboard()
         end
     end
 
+    -- Unused keys are dimmed (low alpha + muted text) rather than just a
+    -- slightly different grey, since "filled" and "grey" read as nearly
+    -- identical at this size/distance — dimming makes used-vs-unused obvious
+    -- at a glance, on top of the existing green/yellow/grey color coding.
     for letter, key in pairs(keyTiles) do
         local state = best[letter]
-        local colorKey = state == 2 and "green" or state == 1 and "yellow" or state == 0 and "grey" or "filled"
-        local c = GW.TILE_COLORS[colorKey]
-        key.bg:SetColorTexture(c.r, c.g, c.b, 1)
+        if state ~= nil then
+            local c = GW.TILE_COLORS[state == 2 and "green" or state == 1 and "yellow" or "grey"]
+            key.bg:SetColorTexture(c.r, c.g, c.b, 1)
+            key.text:SetTextColor(1, 1, 1)
+        else
+            local c = GW.TILE_COLORS.filled
+            key.bg:SetColorTexture(c.r, c.g, c.b, 0.45)
+            key.text:SetTextColor(0.55, 0.55, 0.55)
+        end
     end
 end
 
