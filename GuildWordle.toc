@@ -1,4 +1,4 @@
-## Interface: 11508
+## Interface: 20506
 ## Title: GuildWordle
 ## Notes: In-game Wordle with daily guild leaderboard
 ## Author: Bonnie
