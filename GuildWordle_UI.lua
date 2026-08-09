@@ -8,7 +8,7 @@ local GRID_W   = 5 * (TILE_SZ + 2) + 4 * TILE_GAP  -- 294px
 local GAME_W   = GRID_W + 26                         -- 320px  (game section)
 local LB_W     = 170                                 -- leaderboard section width
 local FRAME_W  = GAME_W + LB_W                       -- 490px total
-local FRAME_H  = 660
+local FRAME_H  = 610
 
 local GRID_X   = 13   -- (GAME_W - GRID_W) / 2
 local GRID_Y   = -50
@@ -59,6 +59,12 @@ frame:SetSize(FRAME_W, FRAME_H)
 frame:SetPoint("CENTER")
 frame:Hide()
 frame:SetMovable(true)
+-- Needed so the frame's own body/background can receive mouse events at all —
+-- RegisterForDrag only picks which button starts a drag once mouse events are
+-- actually reaching the frame; without this, clicks on blank background areas
+-- (not covered by a more specific mouse-enabled child) fall straight through
+-- to the 3D world instead of registering as a drag on this frame.
+frame:EnableMouse(true)
 frame:SetClampedToScreen(true)
 frame:RegisterForDrag("LeftButton")
 frame:SetScript("OnDragStart", frame.StartMoving)
@@ -168,69 +174,14 @@ submitBtn:SetSize(72, 24)
 submitBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 230, ROW_Y - 2)
 submitBtn:SetText("Enter")
 
--- ── Auto-share checkboxes (persistent setting, always visible) ───────────
--- Unlike a per-completion "Share" button, these reflect a standing preference:
--- whichever channels are checked get an automatic chat post the moment the
--- game is completed (see GW.AutoShareResult in GuildWordle.lua). State is
--- read/written straight to GuildWordleDB.settings.autoShare.
-
-local CHECK_Y = ROW_Y - 34
-local SHARE_CHANNELS = {"GUILD", "PARTY", "RAID"}
-local SHARE_LABELS = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
-
-local autoShareLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-autoShareLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, CHECK_Y)
-autoShareLabel:SetText("Auto-share:")
-autoShareLabel:SetTextColor(0.8, 0.8, 0.8)
-
-local autoShareChecks = {}
-do
-    local x = 14 + autoShareLabel:GetStringWidth() + 10
-    for _, chan in ipairs(SHARE_CHANNELS) do
-        local check = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-        check:SetSize(22, 22)
-        check:SetPoint("TOPLEFT", frame, "TOPLEFT", x, CHECK_Y + 4)
-        check:SetScript("OnClick", function(self)
-            GuildWordleDB.settings.autoShare[chan] = self:GetChecked() and true or false
-        end)
-        x = x + 22
-
-        local label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        label:SetPoint("LEFT", check, "RIGHT", 2, 1)
-        label:SetText(SHARE_LABELS[chan])
-        x = x + label:GetStringWidth() + 10
-
-        autoShareChecks[chan] = check
-    end
-end
-
-local function RefreshAutoShareChecks()
-    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
-    if not autoShare then return end
-    for _, chan in ipairs(SHARE_CHANNELS) do
-        autoShareChecks[chan]:SetChecked(autoShare[chan] and true or false)
-    end
-end
-
--- ── Share-now button (only once the game is done) ───────────────────────
--- Ad-hoc re-broadcast for anyone who forgot to check the boxes above before
--- finishing; posts to whichever channels are currently checked, on demand.
-
-local SHARE_NOW_Y = CHECK_Y - 34
-
-local shareNowBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
-shareNowBtn:SetSize(140, 22)
-shareNowBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, SHARE_NOW_Y)
-shareNowBtn:SetText("Share results now")
-shareNowBtn:SetScript("OnClick", function() GW.ShareNow() end)
-shareNowBtn:Hide()
-
 -- ── On-screen keyboard (letters used so far, color-coded) ─────────────────
+-- Sits directly under the input row now that sharing controls live in the
+-- right column instead of stacking underneath this one.
 
 local KB_ROWS = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"}
 local KEY_W, KEY_H, KEY_GAP = 26, 26, 3
 local KEY_STRIDE = KEY_H + KEY_GAP
-local KB_Y = SHARE_NOW_Y - 34
+local KB_Y = ROW_Y - 34
 
 local keyTiles = {}
 for rowIdx, letters in ipairs(KB_ROWS) do
@@ -280,7 +231,12 @@ local function RefreshKeyboard()
     end
 end
 
--- ── Leaderboard panel ───────────────────────────────────────────────────────────
+-- ── Leaderboard panel (top half of right column, scrollable) ─────────────
+-- Only VISIBLE_ROWS are shown at once — a mouse-wheel-scrollable viewport
+-- rather than reserving fixed space for a large row count, so the window
+-- doesn't grow with guild size. ROW_POOL_SIZE widgets are pre-created and
+-- recycled; entries beyond that soft cap simply don't render (guild results
+-- lists this large are not expected in practice).
 
 local LB_PAD = GAME_W + 10   -- content starts 10px past divider
 
@@ -292,9 +248,12 @@ lbSubtitle:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, -50)
 lbSubtitle:SetWidth(LB_W - 12)
 lbSubtitle:SetTextColor(0.5, 0.5, 0.5)
 
-local MAX_LB_ROWS = 16
-local LB_ROW_H   = 20
-local LB_ROW_Y0  = -68   -- y of first entry
+local VISIBLE_ROWS   = 14
+local LB_ROW_H       = 20
+local LB_ROW_Y0      = -68   -- y of the scroll viewport's top edge
+local ROW_POOL_SIZE  = 30
+local SCROLLBAR_RESERVE = 24 -- room for UIPanelScrollFrameTemplate's up/down buttons + track
+local LB_SCROLL_W    = (LB_W - 12) - SCROLLBAR_RESERVE
 
 -- Tile colors for the hover tooltip (0=grey, 1=yellow, 2=green); reuses the
 -- same filled square glyph for all three since color does the differentiating
@@ -312,18 +271,35 @@ local function AddPatternToTooltip(pattern)
     end
 end
 
+local lbScroll = CreateFrame("ScrollFrame", "GuildWordleLBScroll", frame, "UIPanelScrollFrameTemplate")
+lbScroll:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, LB_ROW_Y0)
+lbScroll:SetSize(LB_SCROLL_W, VISIBLE_ROWS * LB_ROW_H)
+lbScroll:EnableMouseWheel(true)
+
+local lbScrollChild = CreateFrame("Frame", nil, lbScroll)
+lbScrollChild:SetSize(LB_SCROLL_W, VISIBLE_ROWS * LB_ROW_H)
+lbScroll:SetScrollChild(lbScrollChild)
+
+lbScroll:SetScript("OnMouseWheel", function(self, delta)
+    local newOffset = self:GetVerticalScroll() - delta * LB_ROW_H
+    local maxOffset = math.max(0, lbScrollChild:GetHeight() - self:GetHeight())
+    if newOffset < 0 then newOffset = 0 end
+    if newOffset > maxOffset then newOffset = maxOffset end
+    self:SetVerticalScroll(newOffset)
+end)
+
 local lbRows, lbHovers = {}, {}
-for i = 1, MAX_LB_ROWS do
-    local row = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    row:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, LB_ROW_Y0 - (i-1)*LB_ROW_H)
-    row:SetWidth(LB_W - 12)
+for i = 1, ROW_POOL_SIZE do
+    local row = lbScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    row:SetPoint("TOPLEFT", lbScrollChild, "TOPLEFT", 0, -(i-1)*LB_ROW_H)
+    row:SetWidth(LB_SCROLL_W)
     row:SetJustifyH("LEFT")
     row:SetText("")
     lbRows[i] = row
 
-    local hover = CreateFrame("Frame", nil, frame)
+    local hover = CreateFrame("Frame", nil, lbScrollChild)
     hover:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
-    hover:SetSize(LB_W - 12, LB_ROW_H)
+    hover:SetSize(LB_SCROLL_W, LB_ROW_H)
     hover:EnableMouse(true)
     -- EnableMouse is needed for the tooltip, but that also swallows drag
     -- gestures before they reach the parent frame — forward them explicitly
@@ -355,10 +331,11 @@ local function UpdateLBPanel()
 
     if not lb or not next(lb) then
         lbSubtitle:SetText("No results yet")
-        for i, r in ipairs(lbRows) do
-            r:SetText("")
+        for i = 1, ROW_POOL_SIZE do
+            lbRows[i]:SetText("")
             lbHovers[i].entryData = nil
         end
+        lbScrollChild:SetHeight(VISIBLE_ROWS * LB_ROW_H)
         return
     end
 
@@ -373,8 +350,9 @@ local function UpdateLBPanel()
     end)
 
     lbSubtitle:SetText(#sorted .. " result" .. (#sorted ~= 1 and "s" or "") .. " today")
+    lbScrollChild:SetHeight(math.max(VISIBLE_ROWS, math.min(#sorted, ROW_POOL_SIZE)) * LB_ROW_H)
 
-    for i = 1, MAX_LB_ROWS do
+    for i = 1, ROW_POOL_SIZE do
         local e = sorted[i]
         if e then
             local score = e.solved and (e.guesses .. "/6") or "X/6"
@@ -390,6 +368,56 @@ local function UpdateLBPanel()
 end
 
 GW.OnLeaderboardUpdate = UpdateLBPanel
+
+-- ── Announcements panel (bottom half of right column) ───────────────────
+-- Auto-share checkboxes + manual "Share results now" button live here rather
+-- than in the game column, so sharing controls don't compete with the game
+-- itself for vertical space.
+
+local ANNOUNCE_Y0 = LB_ROW_Y0 - VISIBLE_ROWS * LB_ROW_H - 16
+
+local announceLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+announceLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, ANNOUNCE_Y0)
+announceLabel:SetText("|cffFFD700Announcements|r")
+
+local SHARE_CHANNELS = {"GUILD", "PARTY", "RAID"}
+local SHARE_LABELS = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
+local CHECK_ROW_H = 24
+
+local autoShareChecks = {}
+for i, chan in ipairs(SHARE_CHANNELS) do
+    local y = ANNOUNCE_Y0 - 20 - (i-1) * CHECK_ROW_H
+
+    local check = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    check:SetSize(20, 20)
+    check:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, y)
+    check:SetScript("OnClick", function(self)
+        GuildWordleDB.settings.autoShare[chan] = self:GetChecked() and true or false
+    end)
+
+    local label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    label:SetPoint("LEFT", check, "RIGHT", 2, 1)
+    label:SetText(SHARE_LABELS[chan] .. " auto-share")
+
+    autoShareChecks[chan] = check
+end
+
+local function RefreshAutoShareChecks()
+    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
+    if not autoShare then return end
+    for _, chan in ipairs(SHARE_CHANNELS) do
+        autoShareChecks[chan]:SetChecked(autoShare[chan] and true or false)
+    end
+end
+
+local SHARE_NOW_Y = ANNOUNCE_Y0 - 20 - (#SHARE_CHANNELS * CHECK_ROW_H) - 10
+
+local shareNowBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+shareNowBtn:SetSize(LB_W - 24, 22)
+shareNowBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, SHARE_NOW_Y)
+shareNowBtn:SetText("Share results now")
+shareNowBtn:SetScript("OnClick", function() GW.ShareNow() end)
+shareNowBtn:Hide()
 
 -- ── Grid helpers ────────────────────────────────────────────────────────────
 
