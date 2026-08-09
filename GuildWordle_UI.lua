@@ -325,6 +325,12 @@ for i = 1, MAX_LB_ROWS do
     hover:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
     hover:SetSize(LB_W - 12, LB_ROW_H)
     hover:EnableMouse(true)
+    -- EnableMouse is needed for the tooltip, but that also swallows drag
+    -- gestures before they reach the parent frame — forward them explicitly
+    -- so the window stays draggable even when starting on a leaderboard row.
+    hover:RegisterForDrag("LeftButton")
+    hover:SetScript("OnDragStart", function() frame:StartMoving() end)
+    hover:SetScript("OnDragStop", function() frame:StopMovingOrSizing() end)
     hover:SetScript("OnEnter", function(self)
         local e = self.entryData
         if not e then return end
