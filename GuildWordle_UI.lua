@@ -231,22 +231,25 @@ local function RefreshKeyboard()
         end
     end
 
-    -- Used keys get a fully opaque, bright fill (any of the three colors);
-    -- unused keys get a near-invisible fill so they read as clearly inactive
-    -- against the fixed border. A brighter "absent" grey than the tile grid
-    -- uses, since on this flat keyboard row (no per-tile border contrast to
-    -- lean on) the grid's darker grey read as barely different from unused.
-    local KB_ABSENT = {r = 0.45, g = 0.45, b = 0.48}
+    -- Unused letters are still-viable candidates, so they stay bright/normal
+    -- (matches how NYT's own keyboard treats them). Green/yellow (present or
+    -- correct) stay bright too — that's useful information. Only absent
+    -- (guessed, confirmed not in the word) gets dimmed, since those letters
+    -- are eliminated and shouldn't visually compete with ones still in play.
     for letter, key in pairs(keyTiles) do
         local state = best[letter]
-        if state ~= nil then
-            local c = state == 2 and GW.TILE_COLORS.green or state == 1 and GW.TILE_COLORS.yellow or KB_ABSENT
+        if state == 2 or state == 1 then
+            local c = state == 2 and GW.TILE_COLORS.green or GW.TILE_COLORS.yellow
             key.bg:SetColorTexture(c.r, c.g, c.b, 1)
             key.text:SetTextColor(1, 1, 1)
+        elseif state == 0 then
+            local c = GW.TILE_COLORS.grey
+            key.bg:SetColorTexture(c.r, c.g, c.b, 0.35)
+            key.text:SetTextColor(0.45, 0.45, 0.45)
         else
             local c = GW.TILE_COLORS.filled
-            key.bg:SetColorTexture(c.r, c.g, c.b, 0.12)
-            key.text:SetTextColor(0.5, 0.5, 0.5)
+            key.bg:SetColorTexture(c.r, c.g, c.b, 1)
+            key.text:SetTextColor(1, 1, 1)
         end
     end
 end
