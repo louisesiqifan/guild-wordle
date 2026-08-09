@@ -376,6 +376,13 @@ GW.OnLeaderboardUpdate = UpdateLBPanel
 
 local ANNOUNCE_Y0 = LB_ROW_Y0 - VISIBLE_ROWS * LB_ROW_H - 16
 
+-- Divider between the leaderboard and announcements panels, mirroring the
+-- vertical separator between the game and leaderboard columns.
+local rightDivider = frame:CreateTexture(nil, "ARTWORK")
+rightDivider:SetSize(LB_W - 16, 1)
+rightDivider:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD - 6, ANNOUNCE_Y0 + 8)
+rightDivider:SetColorTexture(0.32, 0.32, 0.32, 1)
+
 local announceLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 announceLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, ANNOUNCE_Y0)
 announceLabel:SetText("|cffFFD700Announcements|r")
@@ -397,7 +404,7 @@ for i, chan in ipairs(SHARE_CHANNELS) do
 
     local label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     label:SetPoint("LEFT", check, "RIGHT", 2, 1)
-    label:SetText(SHARE_LABELS[chan] .. " auto-share")
+    label:SetText(SHARE_LABELS[chan])
 
     autoShareChecks[chan] = check
 end
@@ -412,12 +419,23 @@ end
 
 local SHARE_NOW_Y = ANNOUNCE_Y0 - 20 - (#SHARE_CHANNELS * CHECK_ROW_H) - 10
 
+-- Always visible (not just once the game ends): shows live progress while
+-- playing, and becomes the actual share action once the game is done.
 local shareNowBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
 shareNowBtn:SetSize(LB_W - 24, 22)
 shareNowBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, SHARE_NOW_Y)
-shareNowBtn:SetText("Share results now")
 shareNowBtn:SetScript("OnClick", function() GW.ShareNow() end)
-shareNowBtn:Hide()
+
+local function RefreshShareNowButton()
+    local game = GW.CurrentGame()
+    if game.state == "playing" then
+        shareNowBtn:SetText(string.format("Wordle in progress (%d/6)", #game.guesses))
+        shareNowBtn:Disable()
+    else
+        shareNowBtn:SetText("Share results now")
+        shareNowBtn:Enable()
+    end
+end
 
 -- ── Grid helpers ────────────────────────────────────────────────────────────
 
@@ -466,7 +484,6 @@ local function ShowGameResult(won)
     else
         statusText:SetText("|cffcc4444The word was: |r|cffFFFFFF" .. GW.todaysWord .. "|r")
     end
-    shareNowBtn:Show()
 end
 
 local function RefreshUI()
@@ -476,6 +493,7 @@ local function RefreshUI()
     RefreshKeyboard()
     UpdateLBPanel()
     RefreshAutoShareChecks()
+    RefreshShareNowButton()
 
     local game = GW.CurrentGame()
     dateLabel:SetText("Puzzle · " .. date("%b %d, %Y"))
@@ -486,7 +504,6 @@ local function RefreshUI()
         inputBox:SetFocus()
         local rem = 6 - #game.guesses
         statusText:SetText("|cff888888" .. rem .. " guess" .. (rem ~= 1 and "es" or "") .. " remaining|r")
-        shareNowBtn:Hide()
     else
         ShowGameResult(game.state == "won")
     end
@@ -520,6 +537,7 @@ local function DoSubmit()
     inputBox:SetText("")
     RefreshKeyboard()
     UpdateLBPanel()
+    RefreshShareNowButton()
 
     if done then
         ShowGameResult(won)
