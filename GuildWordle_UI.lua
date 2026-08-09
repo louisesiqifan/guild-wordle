@@ -134,62 +134,47 @@ submitBtn:SetSize(72, 24)
 submitBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 230, ROW_Y - 2)
 submitBtn:SetText("Enter")
 
--- ── Share row (shown in place of the input row once the game is done) ────
+-- ── Auto-share checkboxes (persistent setting, always visible) ───────────
+-- Unlike a per-completion "Share" button, these reflect a standing preference:
+-- whichever channels are checked get an automatic chat post the moment the
+-- game is completed (see GW.AutoShareResult in GuildWordle.lua). State is
+-- read/written straight to GuildWordleDB.settings.autoShare.
 
-local SHARE_BTN_W = 90
+local CHECK_Y = ROW_Y - 34
 local SHARE_CHANNELS = {"GUILD", "PARTY", "RAID"}
 local SHARE_LABELS = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
 
-local shareLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-shareLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, ROW_Y)
-shareLabel:SetText("Share:")
-shareLabel:SetTextColor(0.8, 0.8, 0.8)
-shareLabel:Hide()
+local autoShareLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+autoShareLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, CHECK_Y)
+autoShareLabel:SetText("Auto-share:")
+autoShareLabel:SetTextColor(0.8, 0.8, 0.8)
 
-local shareBtns = {}
-for _, chan in ipairs(SHARE_CHANNELS) do
-    local btn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
-    btn:SetSize(SHARE_BTN_W, 24)
-    btn:SetText(SHARE_LABELS[chan])
-    btn:SetScript("OnClick", function() GW.ShareResult(chan) end)
-    btn:Hide()
-    shareBtns[chan] = btn
-end
-
-local function HideShareRow()
-    shareLabel:Hide()
-    for _, btn in pairs(shareBtns) do btn:Hide() end
-end
-
--- Only offers channels the player is currently in; Party and Raid are mutually
--- exclusive since being in a raid always satisfies IsInGroup() too.
-local function RefreshShareRow()
-    local avail = {}
-    if IsInGuild() then avail[#avail+1] = "GUILD" end
-    if IsInRaid() then
-        avail[#avail+1] = "RAID"
-    elseif IsInGroup() then
-        avail[#avail+1] = "PARTY"
-    end
-
-    if #avail == 0 then
-        HideShareRow()
-        return
-    end
-
-    shareLabel:Show()
-    local x = 14 + shareLabel:GetStringWidth() + 8
+local autoShareChecks = {}
+do
+    local x = 14 + autoShareLabel:GetStringWidth() + 10
     for _, chan in ipairs(SHARE_CHANNELS) do
-        local btn, show = shareBtns[chan], false
-        for _, a in ipairs(avail) do if a == chan then show = true end end
-        if show then
-            btn:ClearAllPoints()
-            btn:SetPoint("TOPLEFT", frame, "TOPLEFT", x, ROW_Y - 2)
-            btn:Show()
-            x = x + SHARE_BTN_W + 6
-        else
-            btn:Hide()
-        end
+        local check = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+        check:SetSize(22, 22)
+        check:SetPoint("TOPLEFT", frame, "TOPLEFT", x, CHECK_Y + 4)
+        check:SetScript("OnClick", function(self)
+            GuildWordleDB.settings.autoShare[chan] = self:GetChecked() and true or false
+        end)
+        x = x + 22
+
+        local label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        label:SetPoint("LEFT", check, "RIGHT", 2, 1)
+        label:SetText(SHARE_LABELS[chan])
+        x = x + label:GetStringWidth() + 10
+
+        autoShareChecks[chan] = check
+    end
+end
+
+local function RefreshAutoShareChecks()
+    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
+    if not autoShare then return end
+    for _, chan in ipairs(SHARE_CHANNELS) do
+        autoShareChecks[chan]:SetChecked(autoShare[chan] and true or false)
     end
 end
 
@@ -210,7 +195,23 @@ local MAX_LB_ROWS = 16
 local LB_ROW_H   = 20
 local LB_ROW_Y0  = -68   -- y of first entry
 
-local lbRows = {}
+-- Tile colors for the hover tooltip (0=grey, 1=yellow, 2=green); reuses the
+-- same filled square glyph for all three since color does the differentiating
+-- here (unlike the plain-text glyphs used in chat messages, which can't rely
+-- on color since chat channels strip |cff codes).
+local TOOLTIP_TILE_HEX = {[0] = "888888", [1] = "b59e3d", [2] = "538d4e"}
+
+local function AddPatternToTooltip(pattern)
+    for _, row in ipairs(GW.UnpackResults(pattern)) do
+        local line = ""
+        for _, v in ipairs(row) do
+            line = line .. "|cff" .. TOOLTIP_TILE_HEX[v] .. GW.SYM_GREEN .. "|r "
+        end
+        GameTooltip:AddLine(line)
+    end
+end
+
+local lbRows, lbHovers = {}, {}
 for i = 1, MAX_LB_ROWS do
     local row = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     row:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, LB_ROW_Y0 - (i-1)*LB_ROW_H)
@@ -218,6 +219,22 @@ for i = 1, MAX_LB_ROWS do
     row:SetJustifyH("LEFT")
     row:SetText("")
     lbRows[i] = row
+
+    local hover = CreateFrame("Frame", nil, frame)
+    hover:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
+    hover:SetSize(LB_W - 12, LB_ROW_H)
+    hover:EnableMouse(true)
+    hover:SetScript("OnEnter", function(self)
+        local e = self.entryData
+        if not e then return end
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:AddLine(e.name, 1, 0.82, 0)
+        GameTooltip:AddLine(e.solved and (e.guesses .. "/6 · Solved") or "X/6 · Not solved", 1, 1, 1)
+        AddPatternToTooltip(e.pattern)
+        GameTooltip:Show()
+    end)
+    hover:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    lbHovers[i] = hover
 end
 
 local function UpdateLBPanel()
@@ -227,13 +244,16 @@ local function UpdateLBPanel()
 
     if not lb or not next(lb) then
         lbSubtitle:SetText("No results yet")
-        for _, r in ipairs(lbRows) do r:SetText("") end
+        for i, r in ipairs(lbRows) do
+            r:SetText("")
+            lbHovers[i].entryData = nil
+        end
         return
     end
 
     local sorted = {}
     for name, data in pairs(lb) do
-        sorted[#sorted+1] = {name=name, guesses=data.guesses, solved=data.solved}
+        sorted[#sorted+1] = {name=name, guesses=data.guesses, solved=data.solved, pattern=data.pattern}
     end
     table.sort(sorted, function(a, b)
         if a.solved ~= b.solved then return a.solved end
@@ -250,8 +270,10 @@ local function UpdateLBPanel()
             local color = e.solved and "|cff538d4e" or "|cffcc4444"
             local name  = #e.name > 9 and (e.name:sub(1,8) .. ".") or e.name
             lbRows[i]:SetText(string.format("|cff888888%d.|r %-9s %s%s|r", i, name, color, score))
+            lbHovers[i].entryData = e
         else
             lbRows[i]:SetText("")
+            lbHovers[i].entryData = nil
         end
     end
 end
@@ -305,12 +327,12 @@ local function ShowGameResult(won)
     else
         statusText:SetText("|cffcc4444The word was: |r|cffFFFFFF" .. GW.todaysWord .. "|r")
     end
-    RefreshShareRow()
 end
 
 local function RefreshUI()
     RefreshGrid()
     UpdateLBPanel()
+    RefreshAutoShareChecks()
 
     local game = GuildWordleDB.game
     dateLabel:SetText("Puzzle · " .. date("%b %d, %Y"))
@@ -321,7 +343,6 @@ local function RefreshUI()
         inputBox:SetFocus()
         local rem = 6 - #game.guesses
         statusText:SetText("|cff888888" .. rem .. " guess" .. (rem ~= 1 and "es" or "") .. " remaining|r")
-        HideShareRow()
     else
         ShowGameResult(game.state == "won")
     end
