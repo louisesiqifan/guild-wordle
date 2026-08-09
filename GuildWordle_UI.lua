@@ -195,7 +195,23 @@ local MAX_LB_ROWS = 16
 local LB_ROW_H   = 20
 local LB_ROW_Y0  = -68   -- y of first entry
 
-local lbRows = {}
+-- Tile colors for the hover tooltip (0=grey, 1=yellow, 2=green); reuses the
+-- same filled square glyph for all three since color does the differentiating
+-- here (unlike the plain-text glyphs used in chat messages, which can't rely
+-- on color since chat channels strip |cff codes).
+local TOOLTIP_TILE_HEX = {[0] = "888888", [1] = "b59e3d", [2] = "538d4e"}
+
+local function AddPatternToTooltip(pattern)
+    for _, row in ipairs(GW.UnpackResults(pattern)) do
+        local line = ""
+        for _, v in ipairs(row) do
+            line = line .. "|cff" .. TOOLTIP_TILE_HEX[v] .. GW.SYM_GREEN .. "|r "
+        end
+        GameTooltip:AddLine(line)
+    end
+end
+
+local lbRows, lbHovers = {}, {}
 for i = 1, MAX_LB_ROWS do
     local row = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     row:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, LB_ROW_Y0 - (i-1)*LB_ROW_H)
@@ -203,6 +219,22 @@ for i = 1, MAX_LB_ROWS do
     row:SetJustifyH("LEFT")
     row:SetText("")
     lbRows[i] = row
+
+    local hover = CreateFrame("Frame", nil, frame)
+    hover:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
+    hover:SetSize(LB_W - 12, LB_ROW_H)
+    hover:EnableMouse(true)
+    hover:SetScript("OnEnter", function(self)
+        local e = self.entryData
+        if not e then return end
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:AddLine(e.name, 1, 0.82, 0)
+        GameTooltip:AddLine(e.solved and (e.guesses .. "/6 · Solved") or "X/6 · Not solved", 1, 1, 1)
+        AddPatternToTooltip(e.pattern)
+        GameTooltip:Show()
+    end)
+    hover:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    lbHovers[i] = hover
 end
 
 local function UpdateLBPanel()
@@ -212,13 +244,16 @@ local function UpdateLBPanel()
 
     if not lb or not next(lb) then
         lbSubtitle:SetText("No results yet")
-        for _, r in ipairs(lbRows) do r:SetText("") end
+        for i, r in ipairs(lbRows) do
+            r:SetText("")
+            lbHovers[i].entryData = nil
+        end
         return
     end
 
     local sorted = {}
     for name, data in pairs(lb) do
-        sorted[#sorted+1] = {name=name, guesses=data.guesses, solved=data.solved}
+        sorted[#sorted+1] = {name=name, guesses=data.guesses, solved=data.solved, pattern=data.pattern}
     end
     table.sort(sorted, function(a, b)
         if a.solved ~= b.solved then return a.solved end
@@ -235,8 +270,10 @@ local function UpdateLBPanel()
             local color = e.solved and "|cff538d4e" or "|cffcc4444"
             local name  = #e.name > 9 and (e.name:sub(1,8) .. ".") or e.name
             lbRows[i]:SetText(string.format("|cff888888%d.|r %-9s %s%s|r", i, name, color, score))
+            lbHovers[i].entryData = e
         else
             lbRows[i]:SetText("")
+            lbHovers[i].entryData = nil
         end
     end
 end
