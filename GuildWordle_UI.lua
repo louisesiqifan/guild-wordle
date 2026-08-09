@@ -196,8 +196,16 @@ for rowIdx, letters in ipairs(KB_ROWS) do
         local key = CreateFrame("Frame", nil, frame)
         key:SetSize(KEY_W, KEY_H)
         key:SetPoint("TOPLEFT", frame, "TOPLEFT", x, y)
-        key.bg = key:CreateTexture(nil, "BACKGROUND")
-        key.bg:SetAllPoints()
+
+        -- Fixed border, always visible, so unused keys still show the
+        -- keyboard's shape instead of looking like blank gaps once dimmed.
+        key.border = key:CreateTexture(nil, "BACKGROUND")
+        key.border:SetAllPoints()
+        key.border:SetColorTexture(0.20, 0.20, 0.20, 1)
+
+        key.bg = key:CreateTexture(nil, "BACKGROUND", nil, 1)
+        key.bg:SetPoint("TOPLEFT", key, "TOPLEFT", 1, -1)
+        key.bg:SetPoint("BOTTOMRIGHT", key, "BOTTOMRIGHT", -1, 1)
 
         key.text = key:CreateFontString(nil, "OVERLAY")
         key.text:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
@@ -223,20 +231,22 @@ local function RefreshKeyboard()
         end
     end
 
-    -- Unused keys are dimmed (low alpha + muted text) rather than just a
-    -- slightly different grey, since "filled" and "grey" read as nearly
-    -- identical at this size/distance — dimming makes used-vs-unused obvious
-    -- at a glance, on top of the existing green/yellow/grey color coding.
+    -- Used keys get a fully opaque, bright fill (any of the three colors);
+    -- unused keys get a near-invisible fill so they read as clearly inactive
+    -- against the fixed border. A brighter "absent" grey than the tile grid
+    -- uses, since on this flat keyboard row (no per-tile border contrast to
+    -- lean on) the grid's darker grey read as barely different from unused.
+    local KB_ABSENT = {r = 0.45, g = 0.45, b = 0.48}
     for letter, key in pairs(keyTiles) do
         local state = best[letter]
         if state ~= nil then
-            local c = GW.TILE_COLORS[state == 2 and "green" or state == 1 and "yellow" or "grey"]
+            local c = state == 2 and GW.TILE_COLORS.green or state == 1 and GW.TILE_COLORS.yellow or KB_ABSENT
             key.bg:SetColorTexture(c.r, c.g, c.b, 1)
             key.text:SetTextColor(1, 1, 1)
         else
             local c = GW.TILE_COLORS.filled
-            key.bg:SetColorTexture(c.r, c.g, c.b, 0.45)
-            key.text:SetTextColor(0.55, 0.55, 0.55)
+            key.bg:SetColorTexture(c.r, c.g, c.b, 0.12)
+            key.text:SetTextColor(0.5, 0.5, 0.5)
         end
     end
 end
