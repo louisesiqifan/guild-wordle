@@ -32,4 +32,9 @@ jobs:
         uses: BigWigsMods/packager@v2
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          # packager@v2 only reads GITHUB_OAUTH for the GitHub-release token;
+          # GITHUB_API_TOKEN was added in a later version of the script that
+          # this major-version tag doesn't include. Set both so this keeps
+          # working if the pin is ever bumped to a newer release.
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
