@@ -8,7 +8,7 @@ local GRID_W   = 5 * (TILE_SZ + 2) + 4 * TILE_GAP  -- 294px
 local GAME_W   = GRID_W + 26                         -- 320px  (game section)
 local LB_W     = 170                                 -- leaderboard section width
 local FRAME_W  = GAME_W + LB_W                       -- 490px total
-local FRAME_H  = 530
+local FRAME_H  = 660
 
 local GRID_X   = 13   -- (GAME_W - GRID_W) / 2
 local GRID_Y   = -50
@@ -178,6 +178,74 @@ local function RefreshAutoShareChecks()
     end
 end
 
+-- ── Share-now button (only once the game is done) ───────────────────────
+-- Ad-hoc re-broadcast for anyone who forgot to check the boxes above before
+-- finishing; posts to whichever channels are currently checked, on demand.
+
+local SHARE_NOW_Y = CHECK_Y - 34
+
+local shareNowBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+shareNowBtn:SetSize(140, 22)
+shareNowBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, SHARE_NOW_Y)
+shareNowBtn:SetText("Share results now")
+shareNowBtn:SetScript("OnClick", function() GW.ShareNow() end)
+shareNowBtn:Hide()
+
+-- ── On-screen keyboard (letters used so far, color-coded) ─────────────────
+
+local KB_ROWS = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"}
+local KEY_W, KEY_H, KEY_GAP = 26, 26, 3
+local KEY_STRIDE = KEY_H + KEY_GAP
+local KB_Y = SHARE_NOW_Y - 34
+
+local keyTiles = {}
+for rowIdx, letters in ipairs(KB_ROWS) do
+    local n = #letters
+    local rowWidth = n * KEY_W + (n - 1) * KEY_GAP
+    local xStart = (GAME_W - rowWidth) / 2
+    local y = KB_Y - (rowIdx - 1) * KEY_STRIDE
+    for i = 1, n do
+        local letter = letters:sub(i, i)
+        local x = xStart + (i - 1) * (KEY_W + KEY_GAP)
+
+        local key = CreateFrame("Frame", nil, frame)
+        key:SetSize(KEY_W, KEY_H)
+        key:SetPoint("TOPLEFT", frame, "TOPLEFT", x, y)
+        key.bg = key:CreateTexture(nil, "BACKGROUND")
+        key.bg:SetAllPoints()
+
+        key.text = key:CreateFontString(nil, "OVERLAY")
+        key.text:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
+        key.text:SetPoint("CENTER")
+        key.text:SetText(letter)
+
+        keyTiles[letter] = key
+    end
+end
+
+-- Best state seen for each letter across all guesses so far (green beats
+-- yellow beats grey, matching standard Wordle keyboard behavior).
+local function RefreshKeyboard()
+    local game = GuildWordleDB.game
+    local best = {}
+    for i, guess in ipairs(game.guesses) do
+        local res = game.results[i]
+        for col = 1, 5 do
+            local letter, state = guess:sub(col, col), res[col]
+            if not best[letter] or state > best[letter] then
+                best[letter] = state
+            end
+        end
+    end
+
+    for letter, key in pairs(keyTiles) do
+        local state = best[letter]
+        local colorKey = state == 2 and "green" or state == 1 and "yellow" or state == 0 and "grey" or "filled"
+        local c = GW.TILE_COLORS[colorKey]
+        key.bg:SetColorTexture(c.r, c.g, c.b, 1)
+    end
+end
+
 -- ── Leaderboard panel ───────────────────────────────────────────────────────────
 
 local LB_PAD = GAME_W + 10   -- content starts 10px past divider
@@ -327,10 +395,12 @@ local function ShowGameResult(won)
     else
         statusText:SetText("|cffcc4444The word was: |r|cffFFFFFF" .. GW.todaysWord .. "|r")
     end
+    shareNowBtn:Show()
 end
 
 local function RefreshUI()
     RefreshGrid()
+    RefreshKeyboard()
     UpdateLBPanel()
     RefreshAutoShareChecks()
 
@@ -343,6 +413,7 @@ local function RefreshUI()
         inputBox:SetFocus()
         local rem = 6 - #game.guesses
         statusText:SetText("|cff888888" .. rem .. " guess" .. (rem ~= 1 and "es" or "") .. " remaining|r")
+        shareNowBtn:Hide()
     else
         ShowGameResult(game.state == "won")
     end
@@ -373,6 +444,7 @@ local function DoSubmit()
     end
 
     inputBox:SetText("")
+    RefreshKeyboard()
     UpdateLBPanel()
 
     if done then

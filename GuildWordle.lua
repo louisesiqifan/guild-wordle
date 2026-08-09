@@ -139,7 +139,7 @@ local function InitDB()
     GuildWordleDB.game = GuildWordleDB.game or {}
     GuildWordleDB.settings = GuildWordleDB.settings or {}
     GuildWordleDB.settings.autoShare = GuildWordleDB.settings.autoShare
-        or {GUILD = false, PARTY = false, RAID = false}
+        or {GUILD = true, PARTY = true, RAID = true}
 
     local today = GetDateString()
     if GuildWordleDB.game.date ~= today then
@@ -252,16 +252,40 @@ local function ChannelIsActive(channel)
     return false
 end
 
-function GW.AutoShareResult()
-    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
-    if not autoShare then return end
+local CHANNEL_NAMES = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
 
+-- Posts to every checked channel the player is currently actually in.
+-- Returns the list of friendly channel names it posted to (possibly empty).
+local function ShareToCheckedChannels()
+    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
+    if not autoShare then return {} end
+
+    local shared = {}
     local msg
     for _, channel in ipairs({"GUILD", "PARTY", "RAID"}) do
         if autoShare[channel] and ChannelIsActive(channel) then
             msg = msg or BuildShareMessage()
             SendChatMessage(msg, channel)
+            shared[#shared + 1] = CHANNEL_NAMES[channel]
         end
+    end
+    return shared
+end
+
+function GW.AutoShareResult()
+    ShareToCheckedChannels()
+end
+
+-- Ad-hoc re-broadcast for when the checkboxes were toggled on after the game
+-- already ended (e.g. someone forgot to check them beforehand).
+function GW.ShareNow()
+    if GuildWordleDB.game.state == "playing" then return end
+
+    local shared = ShareToCheckedChannels()
+    if #shared == 0 then
+        print("|cffFFD700[GuildWordle]|r No channels to share to right now (check the boxes above and make sure you're in that channel).")
+    else
+        print("|cffFFD700[GuildWordle]|r Shared to " .. table.concat(shared, ", ") .. "!")
     end
 end
 
