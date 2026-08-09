@@ -13,7 +13,7 @@ local FRAME_H  = 530
 local GRID_X   = 13   -- (GAME_W - GRID_W) / 2
 local GRID_Y   = -50
 
--- ── Tile factory ─────────────────────────────────────────────────────────────
+-- ── Tile factory ───────────────────────────────────────────────────────────────
 
 local function CreateTile(parent, x, y)
     local border = CreateFrame("Frame", nil, parent)
@@ -52,7 +52,7 @@ local function SetTileState(tile, letter, state)
     end
 end
 
--- ── Main frame ────────────────────────────────────────────────────────────────
+-- ── Main frame ───────────────────────────────────────────────────────────────
 
 local frame = CreateFrame("Frame", "GuildWordleFrame", UIParent, "BasicFrameTemplate")
 frame:SetSize(FRAME_W, FRAME_H)
@@ -134,7 +134,66 @@ submitBtn:SetSize(72, 24)
 submitBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 230, ROW_Y - 2)
 submitBtn:SetText("Enter")
 
--- ── Leaderboard panel ─────────────────────────────────────────────────────────
+-- ── Share row (shown in place of the input row once the game is done) ────
+
+local SHARE_BTN_W = 90
+local SHARE_CHANNELS = {"GUILD", "PARTY", "RAID"}
+local SHARE_LABELS = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
+
+local shareLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+shareLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, ROW_Y)
+shareLabel:SetText("Share:")
+shareLabel:SetTextColor(0.8, 0.8, 0.8)
+shareLabel:Hide()
+
+local shareBtns = {}
+for _, chan in ipairs(SHARE_CHANNELS) do
+    local btn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    btn:SetSize(SHARE_BTN_W, 24)
+    btn:SetText(SHARE_LABELS[chan])
+    btn:SetScript("OnClick", function() GW.ShareResult(chan) end)
+    btn:Hide()
+    shareBtns[chan] = btn
+end
+
+local function HideShareRow()
+    shareLabel:Hide()
+    for _, btn in pairs(shareBtns) do btn:Hide() end
+end
+
+-- Only offers channels the player is currently in; Party and Raid are mutually
+-- exclusive since being in a raid always satisfies IsInGroup() too.
+local function RefreshShareRow()
+    local avail = {}
+    if IsInGuild() then avail[#avail+1] = "GUILD" end
+    if IsInRaid() then
+        avail[#avail+1] = "RAID"
+    elseif IsInGroup() then
+        avail[#avail+1] = "PARTY"
+    end
+
+    if #avail == 0 then
+        HideShareRow()
+        return
+    end
+
+    shareLabel:Show()
+    local x = 14 + shareLabel:GetStringWidth() + 8
+    for _, chan in ipairs(SHARE_CHANNELS) do
+        local btn, show = shareBtns[chan], false
+        for _, a in ipairs(avail) do if a == chan then show = true end end
+        if show then
+            btn:ClearAllPoints()
+            btn:SetPoint("TOPLEFT", frame, "TOPLEFT", x, ROW_Y - 2)
+            btn:Show()
+            x = x + SHARE_BTN_W + 6
+        else
+            btn:Hide()
+        end
+    end
+end
+
+-- ── Leaderboard panel ───────────────────────────────────────────────────────────
 
 local LB_PAD = GAME_W + 10   -- content starts 10px past divider
 
@@ -199,7 +258,7 @@ end
 
 GW.OnLeaderboardUpdate = UpdateLBPanel
 
--- ── Grid helpers ─────────────────────────────────────────────────────────────
+-- ── Grid helpers ────────────────────────────────────────────────────────────
 
 local STATE_MAP = {[0]="grey", [1]="yellow", [2]="green"}
 
@@ -228,7 +287,7 @@ local function UpdatePreview(text)
     end
 end
 
--- ── Game-state display ────────────────────────────────────────────────────────
+-- ── Game-state display ────────────────────────────────────────────────────
 
 local WIN_MSGS = {"Genius!", "Magnificent!", "Impressive!", "Splendid!", "Great!", "Phew!"}
 
@@ -237,15 +296,16 @@ local function HideInputRow()
     submitBtn:Hide(); inputLabel:Hide()
 end
 
-local function ShowGameResult(won, isReplay)
+local function ShowGameResult(won)
     HideInputRow()
     local game = GuildWordleDB.game
     if won then
         local msg = WIN_MSGS[#game.guesses] or "Got it!"
-        statusText:SetText("|cff538d4e" .. msg .. "|r" .. (isReplay and "" or "  Shared with guild!"))
+        statusText:SetText("|cff538d4e" .. msg .. "|r")
     else
         statusText:SetText("|cffcc4444The word was: |r|cffFFFFFF" .. GW.todaysWord .. "|r")
     end
+    RefreshShareRow()
 end
 
 local function RefreshUI()
@@ -261,12 +321,13 @@ local function RefreshUI()
         inputBox:SetFocus()
         local rem = 6 - #game.guesses
         statusText:SetText("|cff888888" .. rem .. " guess" .. (rem ~= 1 and "es" or "") .. " remaining|r")
+        HideShareRow()
     else
-        ShowGameResult(game.state == "won", true)
+        ShowGameResult(game.state == "won")
     end
 end
 
--- ── Submit ────────────────────────────────────────────────────────────────────
+-- ── Submit ──────────────────────────────────────────────────────────────
 
 local function DoSubmit()
     local text = strtrim(inputBox:GetText())
@@ -294,7 +355,7 @@ local function DoSubmit()
     UpdateLBPanel()
 
     if done then
-        ShowGameResult(won, false)
+        ShowGameResult(won)
     else
         local rem = 6 - rowIdx
         statusText:SetText("|cff888888" .. rem .. " guess" .. (rem ~= 1 and "es" or "") .. " remaining|r")

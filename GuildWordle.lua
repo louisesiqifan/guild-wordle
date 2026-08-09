@@ -19,7 +19,7 @@ GW.TILE_COLORS = {
     grey   = {r=0.23, g=0.23, b=0.24},
 }
 
--- ── Helpers ──────────────────────────────────────────────────────────────────
+-- ── Helpers ───────────────────────────────────────────────────────────────
 
 local function GetDateString()
     return date("%Y%m%d")
@@ -131,7 +131,7 @@ local function SendAddonMsg(msg)
     end
 end
 
--- ── SavedVariables init ───────────────────────────────────────────────────────
+-- ── SavedVariables init ───────────────────────────────────────────────────────────
 
 local function InitDB()
     GuildWordleDB = GuildWordleDB or {}
@@ -173,7 +173,7 @@ function GW.ResetGame()
     print("|cffFFD700[GuildWordle]|r Today's game has been reset.")
 end
 
--- ── Game logic ────────────────────────────────────────────────────────────────
+-- ── Game logic ────────────────────────────────────────────────────────────
 
 -- Returns ok, reason|result, done, won
 function GW.SubmitGuess(raw)
@@ -208,7 +208,6 @@ function GW.OnGameEnd(won)
     local me       = UnitName("player")
     local numGuess = #game.guesses
     local packed   = PackResults(game.results)
-    local symbols  = ResultRowsToSymbols(game.results)
 
     -- Save locally first
     GuildWordleDB.leaderboard[today][me] = {
@@ -216,16 +215,44 @@ function GW.OnGameEnd(won)
     }
 
     if IsInGuild() then
-        local scoreStr = won and (numGuess.."/6") or "X/6"
-        SendChatMessage(
-            string.format("[GuildWordle] %s got %s! %s", me, scoreStr, symbols),
-            "GUILD"
-        )
         GW.BroadcastKnownResults()
     end
 end
 
--- ── Addon-message sync ────────────────────────────────────────────────────────
+-- ── Manual share ──────────────────────────────────────────────────────────────
+-- Unlike BroadcastKnownResults (silent addon-message leaderboard sync, which
+-- always runs automatically), posting to visible chat is opt-in: the player
+-- picks a channel via a UI button after the game ends.
+
+local function BuildShareMessage()
+    local game     = GuildWordleDB.game
+    local me       = UnitName("player")
+    local won      = game.state == "won"
+    local numGuess = #game.guesses
+    local symbols  = ResultRowsToSymbols(game.results)
+
+    if won then
+        local triesWord = (numGuess == 1) and "try" or "tries"
+        return string.format("[GuildWordle] %s completed today's Wordle in %d %s! %s",
+            me, numGuess, triesWord, symbols)
+    else
+        return string.format("[GuildWordle] %s gave today's Wordle their best shot but couldn't crack it (X/6). %s",
+            me, symbols)
+    end
+end
+
+function GW.ShareResult(channel)
+    local game = GuildWordleDB.game
+    if game.state == "playing" then return end
+    if channel == "GUILD" and not IsInGuild() then return end
+    if channel == "PARTY" and not IsInGroup() then return end
+    if channel == "RAID"  and not IsInRaid()  then return end
+
+    SendChatMessage(BuildShareMessage(), channel)
+    print("|cffFFD700[GuildWordle]|r Shared to " .. channel:lower() .. "!")
+end
+
+-- ── Addon-message sync ──────────────────────────────────────────────────────────
 -- Gossip protocol: every broadcast carries *everything the sender currently
 -- knows* for today (not just its own result), so a result can reach a client
 -- secondhand through anyone who was online with both parties at different
@@ -327,7 +354,7 @@ function GW.PrintLeaderboard()
     end
 end
 
--- ── Events & slash ───────────────────────────────────────────────────────────
+-- ── Events & slash ────────────────────────────────────────────────────────
 
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("ADDON_LOADED")
