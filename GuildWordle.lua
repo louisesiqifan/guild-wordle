@@ -131,23 +131,62 @@ local function SendAddonMsg(msg)
     end
 end
 
+-- Identifies the current character (not the account), since the account can
+-- have multiple characters — each must get its own daily game, not a shared
+-- one. Includes realm since character names can collide across realms.
+local function CharKey()
+    return UnitName("player") .. "-" .. GetRealmName()
+end
+
+-- Identifies the current character's guild, since the account can have
+-- characters in different guilds — leaderboard/gossip data must stay scoped
+-- to the guild it came from, never bleed into an unrelated guild's board.
+function GW.CurrentGuildKey()
+    local guildName = GetGuildInfo("player")
+    return guildName or "NOGUILD"
+end
+
 -- ── SavedVariables init ───────────────────────────────────────────────────────────
 
 local function InitDB()
     GuildWordleDB = GuildWordleDB or {}
     GuildWordleDB.leaderboard = GuildWordleDB.leaderboard or {}
-    GuildWordleDB.game = GuildWordleDB.game or {}
+    GuildWordleDB.games = GuildWordleDB.games or {}
     GuildWordleDB.settings = GuildWordleDB.settings or {}
     GuildWordleDB.settings.autoShare = GuildWordleDB.settings.autoShare
-        or {GUILD = false, PARTY = false, RAID = false}
+        or {GUILD = true, PARTY = true, RAID = true}
+    GuildWordleDB.settings.scale = GuildWordleDB.settings.scale or 1
 
-    local today = GetDateString()
-    if GuildWordleDB.game.date ~= today then
-        GuildWordleDB.game = { date=today, guesses={}, results={}, state="playing" }
+    local cutoff = tonumber(date("%Y%m%d", time() - 7*86400))
+
+    -- Prune leaderboard entries (per guild bucket) older than 7 days
+    for _, byDate in pairs(GuildWordleDB.leaderboard) do
+        for d in pairs(byDate) do
+            local dNum = tonumber(d)
+            if not dNum or dNum < cutoff then byDate[d] = nil end
+        end
     end
 
-    -- Repair corrupted states (e.g. from a crashed previous session)
-    local g = GuildWordleDB.game
+    -- Prune stale per-character game state older than 7 days
+    for key, g in pairs(GuildWordleDB.games) do
+        local dNum = g and tonumber(g.date)
+        if not dNum or dNum < cutoff then GuildWordleDB.games[key] = nil end
+    end
+end
+
+-- Returns today's game state for the *current character*, creating/resetting
+-- it if this is the first access today or the saved state is corrupted.
+function GW.CurrentGame()
+    local key   = CharKey()
+    local today = GetDateString()
+    local g     = GuildWordleDB.games[key]
+
+    if not g or g.date ~= today then
+        g = { date = today, guesses = {}, results = {}, state = "playing" }
+        GuildWordleDB.games[key] = g
+    end
+
+    -- Repair corrupted state (e.g. from a crashed previous session)
     if type(g.guesses) ~= "table" then g.guesses = {} end
     if type(g.results) ~= "table" then g.results = {} end
     if #g.guesses ~= #g.results then
@@ -157,18 +196,12 @@ local function InitDB()
         g.state = "lost"
     end
 
-    GuildWordleDB.leaderboard[today] = GuildWordleDB.leaderboard[today] or {}
-
-    -- Prune entries older than 7 days
-    local cutoff = tonumber(date("%Y%m%d", time() - 7*86400))
-    for k in pairs(GuildWordleDB.leaderboard) do
-        if tonumber(k) < cutoff then GuildWordleDB.leaderboard[k] = nil end
-    end
+    return g
 end
 
 function GW.ResetGame()
     local today = GetDateString()
-    GuildWordleDB.game = { date=today, guesses={}, results={}, state="playing" }
+    GuildWordleDB.games[CharKey()] = { date=today, guesses={}, results={}, state="playing" }
     if GuildWordleFrame and GuildWordleFrame:IsShown() then
         GuildWordleFrame:Hide()
         GuildWordleFrame:Show()
@@ -181,7 +214,7 @@ end
 -- Returns ok, reason|result, done, won
 function GW.SubmitGuess(raw)
     local guess = raw:upper()
-    local game  = GuildWordleDB.game
+    local game  = GW.CurrentGame()
 
     if game.state ~= "playing"  then return false, "already_done"  end
     if #guess ~= WORD_LEN       then return false, "wrong_length"  end
@@ -206,14 +239,17 @@ function GW.SubmitGuess(raw)
 end
 
 function GW.OnGameEnd(won)
-    local game     = GuildWordleDB.game
+    local game     = GW.CurrentGame()
     local today    = GetDateString()
     local me       = UnitName("player")
     local numGuess = #game.guesses
     local packed   = PackResults(game.results)
+    local guildKey = GW.CurrentGuildKey()
 
-    -- Save locally first
-    GuildWordleDB.leaderboard[today][me] = {
+    -- Save locally first, scoped to the guild this character is actually in
+    GuildWordleDB.leaderboard[guildKey] = GuildWordleDB.leaderboard[guildKey] or {}
+    GuildWordleDB.leaderboard[guildKey][today] = GuildWordleDB.leaderboard[guildKey][today] or {}
+    GuildWordleDB.leaderboard[guildKey][today][me] = {
         guesses = numGuess, solved = won, pattern = packed,
     }
 
@@ -230,7 +266,7 @@ end
 -- checked here automatically rather than requiring a manual action each time.
 
 local function BuildShareMessage()
-    local game     = GuildWordleDB.game
+    local game     = GW.CurrentGame()
     local me       = UnitName("player")
     local won      = game.state == "won"
     local numGuess = #game.guesses
@@ -252,16 +288,40 @@ local function ChannelIsActive(channel)
     return false
 end
 
-function GW.AutoShareResult()
-    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
-    if not autoShare then return end
+local CHANNEL_NAMES = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
 
+-- Posts to every checked channel the player is currently actually in.
+-- Returns the list of friendly channel names it posted to (possibly empty).
+local function ShareToCheckedChannels()
+    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
+    if not autoShare then return {} end
+
+    local shared = {}
     local msg
     for _, channel in ipairs({"GUILD", "PARTY", "RAID"}) do
         if autoShare[channel] and ChannelIsActive(channel) then
             msg = msg or BuildShareMessage()
             SendChatMessage(msg, channel)
+            shared[#shared + 1] = CHANNEL_NAMES[channel]
         end
+    end
+    return shared
+end
+
+function GW.AutoShareResult()
+    ShareToCheckedChannels()
+end
+
+-- Ad-hoc re-broadcast for when the checkboxes were toggled on after the game
+-- already ended (e.g. someone forgot to check them beforehand).
+function GW.ShareNow()
+    if GW.CurrentGame().state == "playing" then return end
+
+    local shared = ShareToCheckedChannels()
+    if #shared == 0 then
+        print("|cffFFD700[GuildWordle]|r No channels to share to right now (check the boxes above and make sure you're in that channel).")
+    else
+        print("|cffFFD700[GuildWordle]|r Shared to " .. table.concat(shared, ", ") .. "!")
     end
 end
 
@@ -279,7 +339,10 @@ local MAX_MSG_LEN = 200  -- payload budget per message, safely under the ~255-ch
 function GW.BroadcastKnownResults()
     if not IsInGuild() then return end
     local today = GetDateString()
-    local lb = GuildWordleDB.leaderboard[today]
+    -- Only ever gossip the entries scoped to *this* character's current guild —
+    -- never leak another guild's data an alt on this account happens to know.
+    local lb = GuildWordleDB.leaderboard[GW.CurrentGuildKey()]
+    lb = lb and lb[today]
     if not lb or not next(lb) then return end
 
     local header = "RESULTS:" .. today .. ":"
@@ -316,10 +379,16 @@ local function HandleAddonMessage(prefix, text, channel, sender)
         local _, _, rDate, rest = text:find("^RESULTS:([^:]+):(.+)$")
         if rDate == today and rest then
             local changed = false
+            -- Addon messages only ever arrive over the guild channel this
+            -- character is currently in, so it's always safe to store the
+            -- incoming data under that same guild's bucket.
+            local guildKey = GW.CurrentGuildKey()
+            GuildWordleDB.leaderboard[guildKey] = GuildWordleDB.leaderboard[guildKey] or {}
+            GuildWordleDB.leaderboard[guildKey][today] = GuildWordleDB.leaderboard[guildKey][today] or {}
             for entry in rest:gmatch("[^;]+") do
                 local rName, rGuess, rSolved, rPat = entry:match("^([^,]+),(%d+),([01]),(.+)$")
                 if rName then
-                    GuildWordleDB.leaderboard[today][rName] = {
+                    GuildWordleDB.leaderboard[guildKey][today][rName] = {
                         guesses = tonumber(rGuess),
                         solved  = rSolved == "1",
                         pattern = rPat,
@@ -335,9 +404,10 @@ end
 -- ── Leaderboard (printed to chat) ────────────────────────────────────────────
 
 function GW.PrintLeaderboard()
-    local today    = GetDateString()
-    local lb       = GuildWordleDB.leaderboard[today]
-    local game     = GuildWordleDB.game
+    local today     = GetDateString()
+    local guildKey  = GW.CurrentGuildKey()
+    local lb        = GuildWordleDB.leaderboard[guildKey] and GuildWordleDB.leaderboard[guildKey][today]
+    local game      = GW.CurrentGame()
     local hasPlayed = game.date == today and game.state ~= "playing"
 
     if not lb or not next(lb) then

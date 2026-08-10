@@ -8,7 +8,7 @@ local GRID_W   = 5 * (TILE_SZ + 2) + 4 * TILE_GAP  -- 294px
 local GAME_W   = GRID_W + 26                         -- 320px  (game section)
 local LB_W     = 170                                 -- leaderboard section width
 local FRAME_W  = GAME_W + LB_W                       -- 490px total
-local FRAME_H  = 530
+local FRAME_H  = 610
 
 local GRID_X   = 13   -- (GAME_W - GRID_W) / 2
 local GRID_Y   = -50
@@ -59,6 +59,12 @@ frame:SetSize(FRAME_W, FRAME_H)
 frame:SetPoint("CENTER")
 frame:Hide()
 frame:SetMovable(true)
+-- Needed so the frame's own body/background can receive mouse events at all —
+-- RegisterForDrag only picks which button starts a drag once mouse events are
+-- actually reaching the frame; without this, clicks on blank background areas
+-- (not covered by a more specific mouse-enabled child) fall straight through
+-- to the 3D world instead of registering as a drag on this frame.
+frame:EnableMouse(true)
 frame:SetClampedToScreen(true)
 frame:RegisterForDrag("LeftButton")
 frame:SetScript("OnDragStart", frame.StartMoving)
@@ -82,6 +88,40 @@ local sep = frame:CreateTexture(nil, "ARTWORK")
 sep:SetSize(1, FRAME_H - 28)
 sep:SetPoint("TOPLEFT", frame, "TOPLEFT", GAME_W, -24)
 sep:SetColorTexture(0.32, 0.32, 0.32, 1)
+
+-- ── Resize grip ───────────────────────────────────────────────────────────────
+-- The layout is fixed-pixel (not a reflowing grid), so "resizing" scales the
+-- whole frame uniformly via SetScale rather than actually changing its
+-- Width/Height. Drag distance maps to scale change; the chosen scale is
+-- saved account-wide and restored on next open.
+
+local MIN_SCALE, MAX_SCALE = 0.6, 1.3
+
+local resizeGrip = CreateFrame("Button", nil, frame)
+resizeGrip:SetSize(16, 16)
+resizeGrip:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -4, 4)
+resizeGrip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+resizeGrip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+resizeGrip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+
+resizeGrip:SetScript("OnMouseDown", function(self)
+    self.dragging = true
+    self.startX = select(1, GetCursorPosition())
+    self.startScale = frame:GetScale()
+end)
+resizeGrip:SetScript("OnMouseUp", function(self)
+    self.dragging = false
+    GuildWordleDB.settings.scale = frame:GetScale()
+end)
+resizeGrip:SetScript("OnUpdate", function(self)
+    if not self.dragging then return end
+    local x = select(1, GetCursorPosition())
+    local dx = (x - self.startX) / UIParent:GetEffectiveScale()
+    local newScale = self.startScale + dx / FRAME_W
+    if newScale < MIN_SCALE then newScale = MIN_SCALE end
+    if newScale > MAX_SCALE then newScale = MAX_SCALE end
+    frame:SetScale(newScale)
+end)
 
 -- ── Game section ─────────────────────────────────────────────────────────────
 
@@ -134,66 +174,109 @@ submitBtn:SetSize(72, 24)
 submitBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 230, ROW_Y - 2)
 submitBtn:SetText("Enter")
 
--- ── Auto-share checkboxes (persistent setting, always visible) ───────────
--- Unlike a per-completion "Share" button, these reflect a standing preference:
--- whichever channels are checked get an automatic chat post the moment the
--- game is completed (see GW.AutoShareResult in GuildWordle.lua). State is
--- read/written straight to GuildWordleDB.settings.autoShare.
+-- ── On-screen keyboard (letters used so far, color-coded) ─────────────────
+-- Sits directly under the input row now that sharing controls live in the
+-- right column instead of stacking underneath this one.
 
-local CHECK_Y = ROW_Y - 34
-local SHARE_CHANNELS = {"GUILD", "PARTY", "RAID"}
-local SHARE_LABELS = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
+local KB_ROWS = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"}
+local KEY_W, KEY_H, KEY_GAP = 26, 26, 3
+local KEY_STRIDE = KEY_H + KEY_GAP
+local KB_Y = ROW_Y - 34
 
-local autoShareLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-autoShareLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, CHECK_Y)
-autoShareLabel:SetText("Auto-share:")
-autoShareLabel:SetTextColor(0.8, 0.8, 0.8)
+local keyTiles = {}
+for rowIdx, letters in ipairs(KB_ROWS) do
+    local n = #letters
+    local rowWidth = n * KEY_W + (n - 1) * KEY_GAP
+    local xStart = (GAME_W - rowWidth) / 2
+    local y = KB_Y - (rowIdx - 1) * KEY_STRIDE
+    for i = 1, n do
+        local letter = letters:sub(i, i)
+        local x = xStart + (i - 1) * (KEY_W + KEY_GAP)
 
-local autoShareChecks = {}
-do
-    local x = 14 + autoShareLabel:GetStringWidth() + 10
-    for _, chan in ipairs(SHARE_CHANNELS) do
-        local check = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-        check:SetSize(22, 22)
-        check:SetPoint("TOPLEFT", frame, "TOPLEFT", x, CHECK_Y + 4)
-        check:SetScript("OnClick", function(self)
-            GuildWordleDB.settings.autoShare[chan] = self:GetChecked() and true or false
-        end)
-        x = x + 22
+        local key = CreateFrame("Frame", nil, frame)
+        key:SetSize(KEY_W, KEY_H)
+        key:SetPoint("TOPLEFT", frame, "TOPLEFT", x, y)
 
-        local label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        label:SetPoint("LEFT", check, "RIGHT", 2, 1)
-        label:SetText(SHARE_LABELS[chan])
-        x = x + label:GetStringWidth() + 10
+        -- Fixed border, always visible, so unused keys still show the
+        -- keyboard's shape instead of looking like blank gaps once dimmed.
+        key.border = key:CreateTexture(nil, "BACKGROUND")
+        key.border:SetAllPoints()
+        key.border:SetColorTexture(0.20, 0.20, 0.20, 1)
 
-        autoShareChecks[chan] = check
+        key.bg = key:CreateTexture(nil, "BACKGROUND", nil, 1)
+        key.bg:SetPoint("TOPLEFT", key, "TOPLEFT", 1, -1)
+        key.bg:SetPoint("BOTTOMRIGHT", key, "BOTTOMRIGHT", -1, 1)
+
+        key.text = key:CreateFontString(nil, "OVERLAY")
+        key.text:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
+        key.text:SetPoint("CENTER")
+        key.text:SetText(letter)
+
+        keyTiles[letter] = key
     end
 end
 
-local function RefreshAutoShareChecks()
-    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
-    if not autoShare then return end
-    for _, chan in ipairs(SHARE_CHANNELS) do
-        autoShareChecks[chan]:SetChecked(autoShare[chan] and true or false)
+-- Best state seen for each letter across all guesses so far (green beats
+-- yellow beats grey, matching standard Wordle keyboard behavior).
+local function RefreshKeyboard()
+    local game = GW.CurrentGame()
+    local best = {}
+    for i, guess in ipairs(game.guesses) do
+        local res = game.results[i]
+        for col = 1, 5 do
+            local letter, state = guess:sub(col, col), res[col]
+            if not best[letter] or state > best[letter] then
+                best[letter] = state
+            end
+        end
+    end
+
+    -- Unused letters are still-viable candidates, so they stay bright/normal
+    -- (matches how NYT's own keyboard treats them). Green/yellow (present or
+    -- correct) stay bright too — that's useful information. Only absent
+    -- (guessed, confirmed not in the word) gets dimmed, since those letters
+    -- are eliminated and shouldn't visually compete with ones still in play.
+    for letter, key in pairs(keyTiles) do
+        local state = best[letter]
+        if state == 2 or state == 1 then
+            local c = state == 2 and GW.TILE_COLORS.green or GW.TILE_COLORS.yellow
+            key.bg:SetColorTexture(c.r, c.g, c.b, 1)
+            key.text:SetTextColor(1, 1, 1)
+        elseif state == 0 then
+            local c = GW.TILE_COLORS.grey
+            key.bg:SetColorTexture(c.r, c.g, c.b, 0.35)
+            key.text:SetTextColor(0.45, 0.45, 0.45)
+        else
+            local c = GW.TILE_COLORS.filled
+            key.bg:SetColorTexture(c.r, c.g, c.b, 1)
+            key.text:SetTextColor(1, 1, 1)
+        end
     end
 end
 
--- ── Leaderboard panel ───────────────────────────────────────────────────────────
+-- ── Leaderboard panel (top half of right column, scrollable) ─────────────
+-- Only VISIBLE_ROWS are shown at once — a mouse-wheel-scrollable viewport
+-- rather than reserving fixed space for a large row count, so the window
+-- doesn't grow with guild size. ROW_POOL_SIZE widgets are pre-created and
+-- recycled; entries beyond that soft cap simply don't render (guild results
+-- lists this large are not expected in practice).
 
 local LB_PAD = GAME_W + 10   -- content starts 10px past divider
 
 local lbTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 lbTitle:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, -32)
-lbTitle:SetText("|cffFFD700Guild Today|r")
 
 local lbSubtitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 lbSubtitle:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, -50)
 lbSubtitle:SetWidth(LB_W - 12)
 lbSubtitle:SetTextColor(0.5, 0.5, 0.5)
 
-local MAX_LB_ROWS = 16
-local LB_ROW_H   = 20
-local LB_ROW_Y0  = -68   -- y of first entry
+local VISIBLE_ROWS   = 14
+local LB_ROW_H       = 20
+local LB_ROW_Y0      = -68   -- y of the scroll viewport's top edge
+local ROW_POOL_SIZE  = 30
+local SCROLLBAR_RESERVE = 24 -- room for UIPanelScrollFrameTemplate's up/down buttons + track
+local LB_SCROLL_W    = (LB_W - 12) - SCROLLBAR_RESERVE
 
 -- Tile colors for the hover tooltip (0=grey, 1=yellow, 2=green); reuses the
 -- same filled square glyph for all three since color does the differentiating
@@ -211,19 +294,42 @@ local function AddPatternToTooltip(pattern)
     end
 end
 
+local lbScroll = CreateFrame("ScrollFrame", "GuildWordleLBScroll", frame, "UIPanelScrollFrameTemplate")
+lbScroll:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, LB_ROW_Y0)
+lbScroll:SetSize(LB_SCROLL_W, VISIBLE_ROWS * LB_ROW_H)
+lbScroll:EnableMouseWheel(true)
+
+local lbScrollChild = CreateFrame("Frame", nil, lbScroll)
+lbScrollChild:SetSize(LB_SCROLL_W, VISIBLE_ROWS * LB_ROW_H)
+lbScroll:SetScrollChild(lbScrollChild)
+
+lbScroll:SetScript("OnMouseWheel", function(self, delta)
+    local newOffset = self:GetVerticalScroll() - delta * LB_ROW_H
+    local maxOffset = math.max(0, lbScrollChild:GetHeight() - self:GetHeight())
+    if newOffset < 0 then newOffset = 0 end
+    if newOffset > maxOffset then newOffset = maxOffset end
+    self:SetVerticalScroll(newOffset)
+end)
+
 local lbRows, lbHovers = {}, {}
-for i = 1, MAX_LB_ROWS do
-    local row = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    row:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, LB_ROW_Y0 - (i-1)*LB_ROW_H)
-    row:SetWidth(LB_W - 12)
+for i = 1, ROW_POOL_SIZE do
+    local row = lbScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    row:SetPoint("TOPLEFT", lbScrollChild, "TOPLEFT", 0, -(i-1)*LB_ROW_H)
+    row:SetWidth(LB_SCROLL_W)
     row:SetJustifyH("LEFT")
     row:SetText("")
     lbRows[i] = row
 
-    local hover = CreateFrame("Frame", nil, frame)
+    local hover = CreateFrame("Frame", nil, lbScrollChild)
     hover:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
-    hover:SetSize(LB_W - 12, LB_ROW_H)
+    hover:SetSize(LB_SCROLL_W, LB_ROW_H)
     hover:EnableMouse(true)
+    -- EnableMouse is needed for the tooltip, but that also swallows drag
+    -- gestures before they reach the parent frame — forward them explicitly
+    -- so the window stays draggable even when starting on a leaderboard row.
+    hover:RegisterForDrag("LeftButton")
+    hover:SetScript("OnDragStart", function() frame:StartMoving() end)
+    hover:SetScript("OnDragStop", function() frame:StopMovingOrSizing() end)
     hover:SetScript("OnEnter", function(self)
         local e = self.entryData
         if not e then return end
@@ -240,14 +346,19 @@ end
 local function UpdateLBPanel()
     if not GuildWordleDB then return end
     local today = date("%Y%m%d")
-    local lb = GuildWordleDB.leaderboard and GuildWordleDB.leaderboard[today]
+    local guildName = GetGuildInfo("player")
+    lbTitle:SetText(guildName and ("|cffFFD700" .. guildName .. " Today|r") or "|cffFFD700No Guild|r")
+
+    local byGuild = GuildWordleDB.leaderboard and GuildWordleDB.leaderboard[GW.CurrentGuildKey()]
+    local lb = byGuild and byGuild[today]
 
     if not lb or not next(lb) then
         lbSubtitle:SetText("No results yet")
-        for i, r in ipairs(lbRows) do
-            r:SetText("")
+        for i = 1, ROW_POOL_SIZE do
+            lbRows[i]:SetText("")
             lbHovers[i].entryData = nil
         end
+        lbScrollChild:SetHeight(VISIBLE_ROWS * LB_ROW_H)
         return
     end
 
@@ -262,8 +373,9 @@ local function UpdateLBPanel()
     end)
 
     lbSubtitle:SetText(#sorted .. " result" .. (#sorted ~= 1 and "s" or "") .. " today")
+    lbScrollChild:SetHeight(math.max(VISIBLE_ROWS, math.min(#sorted, ROW_POOL_SIZE)) * LB_ROW_H)
 
-    for i = 1, MAX_LB_ROWS do
+    for i = 1, ROW_POOL_SIZE do
         local e = sorted[i]
         if e then
             local score = e.solved and (e.guesses .. "/6") or "X/6"
@@ -280,12 +392,80 @@ end
 
 GW.OnLeaderboardUpdate = UpdateLBPanel
 
+-- ── Announcements panel (bottom half of right column) ───────────────────
+-- Auto-share checkboxes + manual "Share results now" button live here rather
+-- than in the game column, so sharing controls don't compete with the game
+-- itself for vertical space.
+
+local ANNOUNCE_Y0 = LB_ROW_Y0 - VISIBLE_ROWS * LB_ROW_H - 16
+
+-- Divider between the leaderboard and announcements panels, mirroring the
+-- vertical separator between the game and leaderboard columns.
+local rightDivider = frame:CreateTexture(nil, "ARTWORK")
+rightDivider:SetSize(LB_W - 16, 1)
+rightDivider:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD - 6, ANNOUNCE_Y0 + 8)
+rightDivider:SetColorTexture(0.32, 0.32, 0.32, 1)
+
+local announceLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+announceLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, ANNOUNCE_Y0)
+announceLabel:SetText("|cffFFD700Announcements|r")
+
+local SHARE_CHANNELS = {"GUILD", "PARTY", "RAID"}
+local SHARE_LABELS = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
+local CHECK_ROW_H = 24
+
+local autoShareChecks = {}
+for i, chan in ipairs(SHARE_CHANNELS) do
+    local y = ANNOUNCE_Y0 - 20 - (i-1) * CHECK_ROW_H
+
+    local check = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+    check:SetSize(20, 20)
+    check:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, y)
+    check:SetScript("OnClick", function(self)
+        GuildWordleDB.settings.autoShare[chan] = self:GetChecked() and true or false
+    end)
+
+    local label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    label:SetPoint("LEFT", check, "RIGHT", 2, 1)
+    label:SetText(SHARE_LABELS[chan])
+
+    autoShareChecks[chan] = check
+end
+
+local function RefreshAutoShareChecks()
+    local autoShare = GuildWordleDB.settings and GuildWordleDB.settings.autoShare
+    if not autoShare then return end
+    for _, chan in ipairs(SHARE_CHANNELS) do
+        autoShareChecks[chan]:SetChecked(autoShare[chan] and true or false)
+    end
+end
+
+local SHARE_NOW_Y = ANNOUNCE_Y0 - 20 - (#SHARE_CHANNELS * CHECK_ROW_H) - 10
+
+-- Always visible (not just once the game ends): shows live progress while
+-- playing, and becomes the actual share action once the game is done.
+local shareNowBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+shareNowBtn:SetSize(LB_W - 24, 22)
+shareNowBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, SHARE_NOW_Y)
+shareNowBtn:SetScript("OnClick", function() GW.ShareNow() end)
+
+local function RefreshShareNowButton()
+    local game = GW.CurrentGame()
+    if game.state == "playing" then
+        shareNowBtn:SetText(string.format("Wordle in progress (%d/6)", #game.guesses))
+        shareNowBtn:Disable()
+    else
+        shareNowBtn:SetText("Share results now")
+        shareNowBtn:Enable()
+    end
+end
+
 -- ── Grid helpers ────────────────────────────────────────────────────────────
 
 local STATE_MAP = {[0]="grey", [1]="yellow", [2]="green"}
 
 local function RefreshGrid()
-    local game = GuildWordleDB.game
+    local game = GW.CurrentGame()
     for row = 1, 6 do
         for col = 1, 5 do SetTileState(tiles[row][col], "", "empty") end
     end
@@ -298,7 +478,7 @@ local function RefreshGrid()
 end
 
 local function UpdatePreview(text)
-    local game = GuildWordleDB.game
+    local game = GW.CurrentGame()
     if game.state ~= "playing" then return end
     local row = #game.guesses + 1
     if row > 6 then return end
@@ -320,7 +500,7 @@ end
 
 local function ShowGameResult(won)
     HideInputRow()
-    local game = GuildWordleDB.game
+    local game = GW.CurrentGame()
     if won then
         local msg = WIN_MSGS[#game.guesses] or "Got it!"
         statusText:SetText("|cff538d4e" .. msg .. "|r")
@@ -330,11 +510,15 @@ local function ShowGameResult(won)
 end
 
 local function RefreshUI()
+    frame:SetScale((GuildWordleDB.settings and GuildWordleDB.settings.scale) or 1)
+
     RefreshGrid()
+    RefreshKeyboard()
     UpdateLBPanel()
     RefreshAutoShareChecks()
+    RefreshShareNowButton()
 
-    local game = GuildWordleDB.game
+    local game = GW.CurrentGame()
     dateLabel:SetText("Puzzle · " .. date("%b %d, %Y"))
 
     if game.state == "playing" then
@@ -365,15 +549,18 @@ local function DoSubmit()
         return
     end
 
-    local rowIdx = #GuildWordleDB.game.guesses
-    local res    = GuildWordleDB.game.results[rowIdx]
-    local guess  = GuildWordleDB.game.guesses[rowIdx]
+    local game   = GW.CurrentGame()
+    local rowIdx = #game.guesses
+    local res    = game.results[rowIdx]
+    local guess  = game.guesses[rowIdx]
     for col = 1, 5 do
         SetTileState(tiles[rowIdx][col], guess:sub(col,col), STATE_MAP[res[col]])
     end
 
     inputBox:SetText("")
+    RefreshKeyboard()
     UpdateLBPanel()
+    RefreshShareNowButton()
 
     if done then
         ShowGameResult(won)
