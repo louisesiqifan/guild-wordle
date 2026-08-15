@@ -8,12 +8,12 @@ local GRID_W   = 5 * (TILE_SZ + 2) + 4 * TILE_GAP  -- 294px
 local GAME_W   = GRID_W + 26                         -- 320px  (game section)
 local LB_W     = 170                                 -- leaderboard section width
 local FRAME_W  = GAME_W + LB_W                       -- 490px total
-local FRAME_H  = 610
+local FRAME_H  = 626
 
 local GRID_X   = 13   -- (GAME_W - GRID_W) / 2
-local GRID_Y   = -50
+local GRID_Y   = -64  -- pushed down 14px from the base offset to fit the streak line above it
 
--- ── Tile factory ───────────────────────────────────────────────────────────────
+-- ── Tile factory ─────────────────────────────────────────────────────────────
 
 local function CreateTile(parent, x, y)
     local border = CreateFrame("Frame", nil, parent)
@@ -52,7 +52,7 @@ local function SetTileState(tile, letter, state)
     end
 end
 
--- ── Main frame ───────────────────────────────────────────────────────────────
+-- ── Main frame ────────────────────────────────────────────────────────────────
 
 local frame = CreateFrame("Frame", "GuildWordleFrame", UIParent, "BasicFrameTemplate")
 frame:SetSize(FRAME_W, FRAME_H)
@@ -89,7 +89,7 @@ sep:SetSize(1, FRAME_H - 28)
 sep:SetPoint("TOPLEFT", frame, "TOPLEFT", GAME_W, -24)
 sep:SetColorTexture(0.32, 0.32, 0.32, 1)
 
--- ── Resize grip ───────────────────────────────────────────────────────────────
+-- ── Resize grip ──────────────────────────────────────────────────────────────
 -- The layout is fixed-pixel (not a reflowing grid), so "resizing" scales the
 -- whole frame uniformly via SetScale rather than actually changing its
 -- Width/Height. Drag distance maps to scale change; the chosen scale is
@@ -131,6 +131,24 @@ dateLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -26)
 dateLabel:SetWidth(GAME_W)
 dateLabel:SetJustifyH("CENTER")
 dateLabel:SetTextColor(0.55, 0.55, 0.55)
+
+-- Streak label — account-wide (see GW.RecordStreakResult), so this keeps
+-- counting up regardless of which character plays each day.
+local streakLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+streakLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -42)
+streakLabel:SetWidth(GAME_W)
+streakLabel:SetJustifyH("CENTER")
+
+local function RefreshStreakLabel()
+    local s = GuildWordleDB.streak
+    if not s or (s.current == 0 and s.best == 0) then
+        streakLabel:SetText("")
+    elseif s.current > 0 then
+        streakLabel:SetText(string.format("|cffE8B84B%d-day streak|r  (best %d)", s.current, s.best))
+    else
+        streakLabel:SetText(string.format("|cff888888Streak broken|r  (best %d)", s.best))
+    end
+end
 
 -- Tile grid
 local tiles = {}
@@ -174,7 +192,7 @@ submitBtn:SetSize(72, 24)
 submitBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 230, ROW_Y - 2)
 submitBtn:SetText("Enter")
 
--- ── On-screen keyboard (letters used so far, color-coded) ─────────────────
+-- ── On-screen keyboard (letters used so far, color-coded) ─────────────────────
 -- Sits directly under the input row now that sharing controls live in the
 -- right column instead of stacking underneath this one.
 
@@ -254,7 +272,7 @@ local function RefreshKeyboard()
     end
 end
 
--- ── Leaderboard panel (top half of right column, scrollable) ─────────────
+-- ── Leaderboard panel (top half of right column, scrollable) ─────────────────
 -- Only VISIBLE_ROWS are shown at once — a mouse-wheel-scrollable viewport
 -- rather than reserving fixed space for a large row count, so the window
 -- doesn't grow with guild size. ROW_POOL_SIZE widgets are pre-created and
@@ -392,7 +410,7 @@ end
 
 GW.OnLeaderboardUpdate = UpdateLBPanel
 
--- ── Announcements panel (bottom half of right column) ───────────────────
+-- ── Announcements panel (bottom half of right column) ─────────────────────────
 -- Auto-share checkboxes + manual "Share results now" button live here rather
 -- than in the game column, so sharing controls don't compete with the game
 -- itself for vertical space.
@@ -460,7 +478,7 @@ local function RefreshShareNowButton()
     end
 end
 
--- ── Grid helpers ────────────────────────────────────────────────────────────
+-- ── Grid helpers ─────────────────────────────────────────────────────────────
 
 local STATE_MAP = {[0]="grey", [1]="yellow", [2]="green"}
 
@@ -489,7 +507,7 @@ local function UpdatePreview(text)
     end
 end
 
--- ── Game-state display ────────────────────────────────────────────────────
+-- ── Game-state display ────────────────────────────────────────────────────────
 
 local WIN_MSGS = {"Genius!", "Magnificent!", "Impressive!", "Splendid!", "Great!", "Phew!"}
 
@@ -517,6 +535,7 @@ local function RefreshUI()
     UpdateLBPanel()
     RefreshAutoShareChecks()
     RefreshShareNowButton()
+    RefreshStreakLabel()
 
     local game = GW.CurrentGame()
     dateLabel:SetText("Puzzle · " .. date("%b %d, %Y"))
@@ -532,7 +551,7 @@ local function RefreshUI()
     end
 end
 
--- ── Submit ──────────────────────────────────────────────────────────────
+-- ── Submit ────────────────────────────────────────────────────────────────────
 
 local function DoSubmit()
     local text = strtrim(inputBox:GetText())
@@ -561,6 +580,7 @@ local function DoSubmit()
     RefreshKeyboard()
     UpdateLBPanel()
     RefreshShareNowButton()
+    RefreshStreakLabel()
 
     if done then
         ShowGameResult(won)
