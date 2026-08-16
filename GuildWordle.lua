@@ -146,7 +146,7 @@ function GW.CurrentGuildKey()
     return guildName or "NOGUILD"
 end
 
--- ── SavedVariables init ───────────────────────────────────────────────────────────
+-- ── SavedVariables init ───────────────────────────────────────────────────────
 
 local function InitDB()
     GuildWordleDB = GuildWordleDB or {}
@@ -156,6 +156,10 @@ local function InitDB()
     GuildWordleDB.settings.autoShare = GuildWordleDB.settings.autoShare
         or {GUILD = true, PARTY = true, RAID = true}
     GuildWordleDB.settings.scale = GuildWordleDB.settings.scale or 1
+    -- Account-wide (not per-character, unlike the game itself): playing on
+    -- whichever character on a given day keeps the streak going, since it's
+    -- tracking "did this account solve today", not any one character's run.
+    GuildWordleDB.streak = GuildWordleDB.streak or { current = 0, best = 0, lastDate = nil }
 
     local cutoff = tonumber(date("%Y%m%d", time() - 7*86400))
 
@@ -199,6 +203,30 @@ function GW.CurrentGame()
     return g
 end
 
+-- Updates the account-wide streak the first time *any* character finishes
+-- today's game; later completions by other characters the same day are
+-- no-ops (the day is already accounted for). A win extends the streak only
+-- if the previous recorded day was literally yesterday — a skipped day, not
+-- just a loss, also breaks it. Losing resets the streak to 0 immediately.
+function GW.RecordStreakResult(won)
+    local s     = GuildWordleDB.streak
+    local today = GetDateString()
+    if s.lastDate == today then return end
+
+    if won then
+        local yesterday = date("%Y%m%d", time() - 86400)
+        if s.current > 0 and s.lastDate == yesterday then
+            s.current = s.current + 1
+        else
+            s.current = 1
+        end
+        if s.current > s.best then s.best = s.current end
+    else
+        s.current = 0
+    end
+    s.lastDate = today
+end
+
 function GW.ResetGame()
     local today = GetDateString()
     GuildWordleDB.games[CharKey()] = { date=today, guesses={}, results={}, state="playing" }
@@ -209,7 +237,7 @@ function GW.ResetGame()
     print("|cffFFD700[GuildWordle]|r Today's game has been reset.")
 end
 
--- ── Game logic ────────────────────────────────────────────────────────────
+-- ── Game logic ────────────────────────────────────────────────────────────────
 
 -- Returns ok, reason|result, done, won
 function GW.SubmitGuess(raw)
@@ -252,6 +280,8 @@ function GW.OnGameEnd(won)
     GuildWordleDB.leaderboard[guildKey][today][me] = {
         guesses = numGuess, solved = won, pattern = packed,
     }
+
+    GW.RecordStreakResult(won)
 
     if IsInGuild() then
         GW.BroadcastKnownResults()
@@ -325,7 +355,7 @@ function GW.ShareNow()
     end
 end
 
--- ── Addon-message sync ──────────────────────────────────────────────────────────
+-- ── Addon-message sync ────────────────────────────────────────────────────────
 -- Gossip protocol: every broadcast carries *everything the sender currently
 -- knows* for today (not just its own result), so a result can reach a client
 -- secondhand through anyone who was online with both parties at different
@@ -437,7 +467,7 @@ function GW.PrintLeaderboard()
     end
 end
 
--- ── Events & slash ────────────────────────────────────────────────────────
+-- ── Events & slash ───────────────────────────────────────────────────────────
 
 local ev = CreateFrame("Frame")
 ev:RegisterEvent("ADDON_LOADED")
@@ -480,6 +510,14 @@ SlashCmdList["GUILDWORDLE"] = function(msg)
     msg = strtrim(msg):lower()
     if msg == "lb" or msg == "leaderboard" then
         GW.PrintLeaderboard()
+    elseif msg == "streak" then
+        local s = GuildWordleDB.streak
+        if s.current > 0 then
+            print(string.format("|cffFFD700[GuildWordle]|r Current streak: %d day%s (best: %d)",
+                s.current, s.current == 1 and "" or "s", s.best))
+        else
+            print(string.format("|cffFFD700[GuildWordle]|r No active streak (best: %d)", s.best))
+        end
     elseif msg == "reset" then
         GW.ResetGame()
     else
