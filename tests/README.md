@@ -27,13 +27,20 @@ appears to. `run_all.sh` requires `luajit` and refuses to fall back.
 | `harness.lua` | Loads the mock + the real `words.lua`/`GuildWordle.lua` into one global env, mirroring how WoW loads an addon. Exposes `freshDB()`, `setDate()`, `fireEvent()`. |
 | `runner.lua` | ~130-line test runner. No external dependency, deliberately — a broken local toolchain already cost this project time; the tests shouldn't add another thing that can break. |
 | `unit_*.lua`, `integration.lua` | The suites. |
+| `../GuildWordle_Dev.lua` | The in-game dev panel (not a test file, but what section 3's manual UAT is driven with). |
 
 ## Coverage
 
-118 automated tests. Sections 1–2 of the spec are covered; **section 3 (UAT)
-is a manual in-game checklist** — `GuildWordle_UI.lua` is wall-to-wall
-`CreateFrame`/widget calls with no practical headless path, so its behavior is
-specified for manual runs rather than automated.
+153 automated tests. Spec sections 1, 2, 4 and 5 are automated. **Section 3
+(UAT) stays a manual in-game checklist** — the mock's geometry is meaningless
+(widths stub to 0), so layout/visual behavior can't be asserted headlessly.
+
+For manual UAT there's an in-game **dev panel** (`GuildWordle_Dev.lua`, opened
+with `/wordle dev`) that simulates other clients talking to yours: injecting
+fake guildmate results, nicknames, streaks, renames, stale echoes and
+`SYNC_REQ`. It feeds real message strings through the real receive path, so
+what you see is what a real guildmate's broadcast would produce. Keep its
+**Isolate** toggle on (default) so fake data can't reach your real guild.
 
 Regression tests exist for every bug that reached the user in-game:
 
