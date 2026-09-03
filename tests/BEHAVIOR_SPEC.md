@@ -1,6 +1,6 @@
 # GuildWordle — Expected Behavior Specification
 
-Status: **reviewed and implemented.** Sections 1, 2, 4 and 5 are automated (145 tests,
+Status: **reviewed and implemented.** Sections 1, 2, 4 and 5 are automated (146 tests,
 `./tests/run_all.sh`); section 3 is a manual in-game checklist, driven by the dev panel described in
 section 4. Tests reference these IDs by name, so this file stays the source of truth: **add the
 spec entry before writing the test.**
@@ -167,29 +167,36 @@ by inspecting `GuildWordleDB.settings.nickname` afterward, plus through `GW.Trun
 
 ### 1.5 Streak logic (`GW.RecordStreakResult`, `GW.CurrentStreak`)
 
+**The streak measures PARTICIPATION, not success.** Finishing today's puzzle extends the streak
+whether or not the word was solved; the only thing that breaks a streak is skipping a day entirely.
+`GW.RecordStreakResult()` therefore takes **no argument** — it is called on game end regardless of
+outcome. (It previously reset on a loss, making the streak a skill metric rather than a "did you
+show up" one; that was changed deliberately, so a test asserting a loss zeroes the streak is
+asserting the *old* rule and should be updated, not the code.)
+
 All cases below start from `GuildWordleDB.streak = {current=0, best=0, lastDate=nil}` unless noted,
 with the mocked "today" and "yesterday" set explicitly per case.
 
-- **UNIT-STREAK-01**: First-ever win (`lastDate` was nil) → `current = 1`, `best = 1`,
+- **UNIT-STREAK-01**: First-ever play (`lastDate` was nil) → `current = 1`, `best = 1`,
   `lastDate` = today.
-- **UNIT-STREAK-02**: Win with `lastDate` == yesterday and `current > 0` → `current` increments by
+- **UNIT-STREAK-02**: Play with `lastDate` == yesterday and `current > 0` → `current` increments by
   1; `best` updates to match if the new `current` exceeds the old `best`, otherwise `best`
   unchanged.
-- **UNIT-STREAK-03**: Win with `lastDate` == yesterday but `current == 0` (e.g. after a loss
-  yesterday that reset current, then... — construct explicitly) → treated as a fresh start,
-  `current = 1`, not extended.
-- **UNIT-STREAK-04**: Win with `lastDate` older than yesterday (a day was skipped) → `current`
+- **UNIT-STREAK-03**: Play with `lastDate` == yesterday but `current == 0` → treated as a fresh
+  start, `current = 1`, not extended. Only reachable from legacy data written under the old
+  lose-resets rule, but the path still has to behave.
+- **UNIT-STREAK-04**: Play with `lastDate` older than yesterday (a day was skipped) → `current`
   resets to 1 (fresh start), not extended, regardless of how high `current` was before.
-- **UNIT-STREAK-05**: Loss, regardless of prior `current`/`lastDate` → `current` resets to 0
-  immediately; `lastDate` updated to today; `best` is unaffected.
+- **UNIT-STREAK-05**: A **loss** extends the streak exactly like a win — `current` increments,
+  `best` rises with it, `lastDate` = today. Losing must never break a streak.
 - **UNIT-STREAK-06 (idempotency)**: `RecordStreakResult` called twice with `lastDate` already ==
   today (simulating two alts finishing the same day) → the second call is a complete no-op: no
-  change to `current`, `best`, or `lastDate`, regardless of the `won` argument passed the second
-  time (even a `false` on the second call must NOT zero out a `current` that the first, winning
-  call just set).
-- **UNIT-STREAK-07**: `best` never decreases across any sequence of wins/losses — assert this as an
-  invariant across a scripted sequence (win, win, loss, win, loss, loss, win...) rather than only
-  checking individual transitions.
+  change to `current`, `best`, or `lastDate`. Two characters playing the same day is one day of
+  participation, not two.
+- **UNIT-STREAK-07**: Consecutive days always accumulate — after N consecutive played days,
+  `current == N` and `best >= N`, regardless of how many were wins or losses.
+- **UNIT-STREAK-07b**: A gap mid-sequence is the only reset — build a run, skip a day, and confirm
+  `current` restarts at 1 while `best` retains the earlier run, then builds again from there.
 - **UNIT-STREAK-08 (`CurrentStreak` staleness)**: `current > 0` but `lastDate` is neither today nor
   yesterday (a day was skipped with no play at all, and nothing has called `RecordStreakResult`
   since) → `GW.CurrentStreak()` returns `current = 0` at *read time*, without needing another
@@ -343,8 +350,9 @@ into the other's `HandleAddonMessage`-equivalent entry point.
   `BroadcastCharNicknames` were all called; `ShareToCheckedChannels`-equivalent behavior attempted
   per the mocked auto-share settings.
 - **INT-PLAY-02 (loss)**: Fresh day, submit 6 valid-but-wrong guesses → game ends `"lost"`;
-  leaderboard entry `solved=false, guesses=6`; streak reset to 0 (from whatever it was); same
-  broadcast side effects as above.
+  leaderboard entry `solved=false, guesses=6`; the streak **extends** exactly as a win would (the
+  leaderboard records the loss, the streak only records that you played); same broadcast side
+  effects as above.
 - **INT-PLAY-03 (replay blocked)**: After INT-PLAY-01 or 02, submit another guess the same day →
   rejected `"already_done"`; leaderboard entry from the completed game is unchanged (not
   overwritten); no additional broadcasts fired from this rejected attempt.
@@ -551,8 +559,10 @@ observation. Organize as a checklist to run through after any UI-file change, or
 ### 3.4 Streak tabs
 
 17. **UAT-STREAK-01**: "Streak" tab shows only accounts with an active (non-zero) current streak;
-    an account whose streak just broke (loss, or skipped a day) disappears from this tab without
-    needing anyone to reload.
+    an account whose streak just broke — which now means **only** skipping a day, not losing —
+    disappears from this tab without needing anyone to reload.
+17b. **UAT-STREAK-01b**: Lose today's puzzle deliberately → the streak label above the grid goes
+    *up*, not to "Streak broken", and the account stays on the "Streak" tab.
 18. **UAT-STREAK-02**: "Best" tab shows every account that has ever had a non-zero best, including
     ones with a currently-broken streak.
 19. **UAT-STREAK-03**: Switching between Today/Streak/Best tabs always shows current data — no
@@ -676,7 +686,8 @@ broadcasting. Closing the panel also turns dev mode off, so "dev mode ⟺ panel 
 - **DEV-09**: Forced win/loss produce a coherent finished game (`guesses`/`results` same length, or
   `CurrentGame()`'s corruption repair would wipe it) and a matching own-result row.
 - **DEV-10**: The streak helpers set 5/10, and the "break" helper produces a stale `lastDate` that
-  reads as broken immediately.
+  reads as broken immediately. Note the only way to *break* a streak is a date gap — "Force loss"
+  will extend it, which is itself worth eyeballing after this rule change.
 - **DEV-10b**: Those helpers also push the result onto the guild streak board, or the tabs keep
   showing whatever was there before.
 - **DEV-10c**: Every action that changes local state out-of-band triggers a **full-window** refresh
