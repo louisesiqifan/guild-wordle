@@ -91,7 +91,7 @@ T.suite("2.1 Full play-through", function()
         T.assertTrue(kinds["NICKS"],   "should broadcast NICKS")
     end)
 
-    T.test("INT-PLAY-02: a loss records solved=false and zeroes the streak", function()
+    T.test("INT-PLAY-02: a loss records solved=false but still EXTENDS the streak", function()
         H.freshDB()
         Mock.guildName = GUILD
         H.setDate(2026, 3, 15)
@@ -105,10 +105,12 @@ T.suite("2.1 Full play-through", function()
 
         T.assertEquals(GW.CurrentGame().state, "lost")
         local entry = GuildWordleDB.leaderboard[GUILD][H.dateStr()]["Byamba"]
-        T.assertEquals(entry.solved, false)
+        T.assertEquals(entry.solved, false, "the leaderboard still records it as unsolved")
         T.assertEquals(entry.guesses, 6)
-        T.assertEquals(GW.CurrentStreak().current, 0)
-        T.assertEquals(GuildWordleDB.streak.best, 4, "best survives a loss")
+        -- The streak measures showing up, not winning: playing yesterday and
+        -- today is a 5-day streak even though today was a loss.
+        T.assertEquals(GW.CurrentStreak().current, 5, "a loss must not break the streak")
+        T.assertEquals(GuildWordleDB.streak.best, 5, "and it counts toward best")
     end)
 
     T.test("INT-PLAY-03: replaying the same day is blocked and doesn't overwrite the entry", function()
