@@ -261,6 +261,66 @@ T.suite("4 Dev panel", function()
             "the real nickname must be preserved")
     end)
 
+    T.test("DEV-14: SYNC_REQ preview reports the payload without transmitting", function()
+        -- The point of the preview: it has to work for a guildless test
+        -- character, where every broadcast function early-returns and the
+        -- action would otherwise appear to do nothing at all.
+        setup()
+        Mock.guildName = nil          -- explicitly NOT in a guild
+        A.addEight()
+        A.addStreaks()
+
+        Mock.printed = {}
+        Mock.sentAddon = {}
+        A.simulateSyncReq()
+
+        T.assertEquals(#Mock.sentAddon, 0, "preview must not actually transmit anything")
+
+        local out = table.concat(Mock.printed, "\n")
+        T.assertContains(out, "RESULTS", "should report the RESULTS payload")
+        T.assertContains(out, "NICKS",   "should report the NICKS payload")
+        T.assertContains(out, "STREAKS", "should report the STREAKS payload")
+    end)
+
+    T.test("DEV-14b: SYNC_REQ preview restores IsInGuild afterwards, even on error", function()
+        -- IsInGuild is a Blizzard global other addons read; leaving it
+        -- overridden would silently corrupt the whole session.
+        setup()
+        Mock.guildName = nil
+        local before = _G.IsInGuild
+        T.assertFalse(_G.IsInGuild(), "precondition: not in a guild")
+
+        A.simulateSyncReq()
+        T.assertSame(_G.IsInGuild, before, "global must be restored")
+        T.assertFalse(_G.IsInGuild(), "and must report not-in-guild again")
+
+        -- Now force the captured call to throw partway through.
+        local realStreak = GW.BroadcastStreak
+        GW.BroadcastStreak = function() error("boom") end
+        pcall(A.simulateSyncReq)
+        GW.BroadcastStreak = realStreak
+
+        T.assertSame(_G.IsInGuild, before, "global must be restored on the error path too")
+        T.assertFalse(_G.IsInGuild())
+    end)
+
+    T.test("DEV-14c: a client with no data still shares its own identity", function()
+        -- Worth pinning down: the reply is never actually empty, because
+        -- BroadcastStreak/BroadcastCharNicknames call RecordOwnStreakEntry /
+        -- RecordOwnCharNickname first, so a brand-new client still announces
+        -- its own (zero) streak and nickname. RESULTS is the only one of the
+        -- three that can legitimately have nothing to send.
+        setup()
+        Mock.guildName = nil
+        Mock.printed = {}
+        A.simulateSyncReq()
+        local out = table.concat(Mock.printed, "\n")
+        T.assertContains(out, "STREAKS", "own streak entry is always shared")
+        T.assertContains(out, "NICKS",   "own nickname is always shared")
+        T.assertContains(out, "RESULTS|r x0",
+            "but with no games played, RESULTS should report nothing to share")
+    end)
+
     T.test("DEV-12: dev panel visibility follows the devMode flag", function()
         setup()
         T.assertNoThrow(function() GW.SetDevPanelShown(true) end)
