@@ -873,22 +873,31 @@ function GW.PrintLeaderboard()
     end
 end
 
--- ── Dev mode ─────────────────────────────────────────────────────────────────
--- /wordle dev toggles a blanket error-visibility aid: while on, every
--- uncaught Lua error from ANY addon (not just this one — seterrorhandler is
--- client-wide, there's no way to scope it to a single addon's errors) prints
--- to chat, on top of whatever the previous handler already did (the default
--- Lua-error popup, if "Show Lua Errors" happens to be enabled). This exists
--- because several bugs this session were completely silent otherwise —
--- rather than manually pcall-wrapping every new call site as bugs are found,
--- dev mode surfaces the next one immediately. Persisted (not session-only)
--- since the bugs worth chasing with this are often at ADDON_LOADED time,
--- which needs a /reload to reproduce — losing the toggle on reload would
--- defeat the purpose.
+-- ── Error visibility ─────────────────────────────────────────────────────────
+-- Two layers, so "a function silently does nothing when it fails" can't
+-- happen again the way it did repeatedly this session (the charNicknames nil
+-- crash, the nil-word crash, the malformed nickname pattern — all completely
+-- silent until manually pcall-wrapped one at a time):
+--
+-- 1. Any uncaught error whose traceback mentions this addon's own files
+--    ALWAYS prints to chat, unconditionally — no toggle needed, since these
+--    are always worth seeing. Errors from OTHER addons only print while
+--    /wordle dev is on (see below), since printing every other addon's
+--    errors unconditionally would be noisy and isn't this addon's business.
+-- 2. Call sites reached directly from a UI event with no other error
+--    handling in between (slash command dispatch, DoSubmit, the leaderboard
+--    panel refresh, GW.SetNickname) are additionally pcall-wrapped at that
+--    entry point, so one failing step can't silently abort unrelated
+--    sibling steps in the same caller (e.g. a bug in the leaderboard render
+--    previously aborted the rest of GW.SetNickname, including its own
+--    broadcast calls, before this was added).
 local previousErrorHandler = geterrorhandler()
 seterrorhandler(function(msg)
-    if GuildWordleDB and GuildWordleDB.settings and GuildWordleDB.settings.devMode then
-        print("|cffff4444[GuildWordle DEV]|r " .. tostring(msg))
+    local text = tostring(msg)
+    if text:find("AddOns/GuildWordle/", 1, true) then
+        print("|cffff4444[GuildWordle]|r " .. text)
+    elseif GuildWordleDB and GuildWordleDB.settings and GuildWordleDB.settings.devMode then
+        print("|cffff4444[GuildWordle DEV]|r " .. text)
     end
     return previousErrorHandler(msg)
 end)
@@ -933,12 +942,23 @@ ev:SetScript("OnEvent", function(self, event, ...)
         end)
 
     elseif event == "CHAT_MSG_ADDON" then
-        HandleAddonMessage(...)
+        -- pcall-wrapped so a malformed/unexpected incoming gossip message
+        -- can't silently break addon-message handling for the rest of the
+        -- session with no visibility into why.
+        local ok, err = pcall(HandleAddonMessage, ...)
+        if not ok then
+            print("|cffff4444[GuildWordle]|r Addon message handling error: " .. tostring(err))
+        end
     end
 end)
 
 SLASH_GUILDWORDLE1 = "/wordle"
-SlashCmdList["GUILDWORDLE"] = function(msg)
+
+-- Wrapped as a whole (rather than each subcommand individually) so any
+-- future subcommand automatically gets the same protection: a bug in one
+-- branch can't look like "the slash command just does nothing" the way the
+-- nickname and leaderboard bugs did before they were each wrapped by hand.
+local function HandleSlashCommand(msg)
     -- Nicknames need their original casing preserved, so keep a raw copy
     -- alongside the lowercased one used for command matching.
     local raw   = strtrim(msg)
@@ -977,5 +997,12 @@ SlashCmdList["GUILDWORDLE"] = function(msg)
                 GuildWordleFrame:Show()
             end
         end
+    end
+end
+
+SlashCmdList["GUILDWORDLE"] = function(msg)
+    local ok, err = pcall(HandleSlashCommand, msg)
+    if not ok then
+        print("|cffff4444[GuildWordle]|r Command error: " .. tostring(err))
     end
 end
