@@ -792,8 +792,18 @@ local function DoSubmit()
     end
 end
 
-submitBtn:SetScript("OnClick",        DoSubmit)
-inputBox:SetScript("OnEnterPressed",  DoSubmit)
+-- pcall-wrapped for the same reason as SafeUpdateLBPanel above: an uncaught
+-- error here would otherwise make pressing Enter/clicking Submit look like
+-- it just silently does nothing, with no visible cause.
+local function SafeDoSubmit()
+    local ok, err = pcall(DoSubmit)
+    if not ok then
+        print("|cffff4444[GuildWordle]|r Guess submission error: " .. tostring(err))
+    end
+end
+
+submitBtn:SetScript("OnClick",        SafeDoSubmit)
+inputBox:SetScript("OnEnterPressed",  SafeDoSubmit)
 inputBox:SetScript("OnTextChanged",   function(self) UpdatePreview(self:GetText()) end)
 inputBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 
