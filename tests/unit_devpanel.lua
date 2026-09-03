@@ -120,6 +120,32 @@ T.suite("4 Dev panel", function()
         T.assertTrue(found, "the new nickname should be present")
     end)
 
+    T.test("DEV-07b (regression): the rename reaches the streak board too, not just Today", function()
+        -- The results board LOOKS UP the nickname from charNicknames; the
+        -- streak board STORES it as a field. A rename that only sends NICKS:
+        -- updates the first and leaves the second showing the old name --
+        -- a state no real client can produce, since GW.SetNickname always
+        -- broadcasts both. This is exactly what shipped broken.
+        setup()
+        A.addEight()
+        A.addStreaks()
+
+        local board = GuildWordleDB.streakBoard[GUILD]
+        local alphaKey
+        for k, e in pairs(board) do
+            if e.nickname == "Alphanick" then alphaKey = k end
+        end
+        T.assertTrue(alphaKey ~= nil, "precondition: a streak entry named Alphanick exists")
+
+        A.simulateRename()
+
+        T.assertEquals(board[alphaKey].nickname, "RenamedAlpha",
+            "the streak board entry must pick up the new name, not keep the old one")
+        for _, nick in pairs(GuildWordleDB.charNicknames[GUILD]) do
+            T.assertNotEquals(nick, "Alphanick", "and the results-side lookup must update too")
+        end
+    end)
+
     T.test("DEV-08: the stale-echo action cannot revive a broken streak", function()
         setup()
         A.addStreaks()
@@ -168,6 +194,46 @@ T.suite("4 Dev panel", function()
         T.assertEquals(GW.CurrentStreak().current, 0,
             "a 3-day-stale lastDate should read as broken immediately")
         T.assertEquals(GuildWordleDB.streak.best, 10, "best survives")
+    end)
+
+    T.test("DEV-10b (regression): streak helpers also push onto the streak board", function()
+        -- Setting your own streak has to reach the guild streak board too,
+        -- or the tabs keep showing whatever was there before.
+        setup()
+        GuildWordleDB.accountId = "MyAcct"
+        A.setStreak()
+        local mine = GuildWordleDB.streakBoard[GUILD]["MyAcct"]
+        T.assertTrue(mine ~= nil, "own streak entry should exist on the board")
+        T.assertEquals(mine.current, 5)
+        T.assertEquals(mine.best, 10)
+
+        A.breakStreak()
+        mine = GuildWordleDB.streakBoard[GUILD]["MyAcct"]
+        T.assertEquals(mine.current, 0, "board entry should reflect the broken streak")
+        T.assertEquals(mine.best, 10)
+    end)
+
+    T.test("DEV-10c (regression): local-state actions trigger a full-window refresh", function()
+        -- The left-column streak label is refreshed by a file-local function
+        -- in GuildWordle_UI.lua that only runs on frame-show; without a
+        -- full-window refresh hook these actions updated the panel but left
+        -- the label stale until the window was closed and reopened.
+        setup()
+        local calls = 0
+        local real = GW.RefreshMainUI
+        GW.RefreshMainUI = function() calls = calls + 1 end
+
+        A.setStreak()
+        T.assertEquals(calls, 1, "setStreak must refresh the whole window")
+        A.breakStreak()
+        T.assertEquals(calls, 2, "breakStreak must too")
+        A.winToday()
+        T.assertEquals(calls, 3, "and so must a forced win")
+        setup(); GW.RefreshMainUI = function() calls = calls + 1 end
+        A.loseToday()
+        T.assertEquals(calls, 4, "and a forced loss")
+
+        GW.RefreshMainUI = real
     end)
 
     T.test("DEV-11: 'clear fakes' removes every fake and nothing real", function()
