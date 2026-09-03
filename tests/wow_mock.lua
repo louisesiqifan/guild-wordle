@@ -119,6 +119,31 @@ _G.C_Timer = {
 -- fetching the frame and invoking its stored OnEvent handler), and a
 -- catch-all no-op for everything else (SetSize, SetPoint, Hide, Show, ...).
 
+-- A single object that absorbs anything done to it: indexable to any depth
+-- (`x.Foo.Bar`), callable both as a function and as a method (`x:SetText(n)`),
+-- and truthy. Returning a bare function instead would break real addon
+-- patterns like `if frame.TitleText then frame.TitleText:SetText(...) end` --
+-- the guard passes (functions are truthy) and then indexing it errors, which
+-- is a mock artifact rather than a genuine finding.
+-- __call returns the stub itself so factory-style methods keep working:
+-- `local tex = frame:CreateTexture(...)` must yield something usable rather
+-- than nil, or the very next `tex:SetPoint(...)` blows up.
+-- Arithmetic metamethods let measurement-style calls (GetStringWidth,
+-- GetHeight, ...) flow into layout math without erroring. The resulting
+-- numbers are meaningless, so nothing here can meaningfully test *layout* --
+-- but it does let GuildWordle_UI.lua load, which makes its non-layout logic
+-- (sorting, nickname resolution, tooltip payloads) reachable from tests.
+local function stubZero() return 0 end
+local universalStub = setmetatable({}, {
+    __index = function(t) return t end,
+    __call  = function(t) return t end,
+    __add = stubZero, __sub = stubZero, __mul = stubZero,
+    __div = stubZero, __unm = stubZero, __mod = stubZero,
+    __lt  = function() return false end,
+    __le  = function() return false end,
+    __tostring = function() return "<stub>" end,
+})
+
 local function NewMockFrame()
     local frame = {}
     local scripts = {}
@@ -129,8 +154,15 @@ local function NewMockFrame()
     function frame:IsEventRegistered(e) return events[e] or false end
     function frame:SetScript(script, fn) scripts[script] = fn end
     function frame:GetScript(script) return scripts[script] end
+    function frame:Show() self._shown = true end
+    function frame:Hide()
+        self._shown = false
+        local onHide = scripts["OnHide"]
+        if onHide then onHide(self) end
+    end
+    function frame:IsShown() return self._shown == true end
 
-    return setmetatable(frame, {__index = function() return function() end end})
+    return setmetatable(frame, {__index = function() return universalStub end})
 end
 
 function _G.CreateFrame(frameType, name, parent, template)
@@ -138,6 +170,10 @@ function _G.CreateFrame(frameType, name, parent, template)
     table.insert(MockState.createdFrames, f)
     return f
 end
+
+-- Root frame everything anchors to. Only referenced by files that build UI
+-- (GuildWordle_UI.lua, GuildWordle_Dev.lua).
+_G.UIParent = NewMockFrame()
 
 -- ── Slash commands ───────────────────────────────────────────────────────────
 -- GuildWordle.lua registers into these at load time. Tests drive the command
