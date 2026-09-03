@@ -165,9 +165,23 @@ local function InitDB()
     -- the current character's name the first time any character on this
     -- account opens the addon after this update.
     GuildWordleDB.settings.nickname = GuildWordleDB.settings.nickname or UnitName("player")
-    -- Per-guild streak leaderboard: streakBoard[guildKey][nickname] =
-    -- {current, best, lastDate}, synced via the same gossip pattern as the
-    -- daily results leaderboard below.
+    -- Stable, hidden per-account identity key for the streak leaderboard —
+    -- frozen the first time any character on this account ever loads the
+    -- addon, and never re-evaluated after that (this `or` only actually
+    -- calls CharKey() once, ever; every later login on any alt/realm just
+    -- reuses the stored value). It happens to be shaped like a character's
+    -- CharKey purely because that's a convenient, Blizzard-guaranteed-unique
+    -- string to grab at that first moment — it is NOT treated as "the
+    -- current character" anywhere after this line, and stays correct even
+    -- if that original character is later renamed, transferred, or deleted.
+    -- This exists so the streak leaderboard can key entries by something
+    -- that never changes, while the player-facing nickname (which CAN
+    -- change) is just a display field riding along inside each entry — see
+    -- GW.RecordOwnStreakEntry / streakBoard below.
+    GuildWordleDB.accountId = GuildWordleDB.accountId or CharKey()
+    -- Per-guild streak leaderboard: streakBoard[guildKey][accountId] =
+    -- {nickname, current, best, lastDate}, synced via the same gossip
+    -- pattern as the daily results leaderboard below.
     GuildWordleDB.streakBoard = GuildWordleDB.streakBoard or {}
 
     local cutoff = tonumber(date("%Y%m%d", time() - 7*86400))
@@ -260,13 +274,17 @@ end
 -- ── Nickname ─────────────────────────────────────────────────────────────────
 -- Account-wide (like the streak itself), since the streak leaderboard needs
 -- one stable label per account regardless of which alt is currently logged
--- in. Characters ",", ";" and ">" are stripped since nicknames travel over
--- the same delimited addon-message format as streak/result/rename entries.
+-- in. It's purely a *display* field inside each streakBoard entry — entries
+-- are actually keyed by GuildWordleDB.accountId (see InitDB), so renaming is
+-- just an in-place field update, the same as current/best/lastDate already
+-- are; no delete-and-recreate dance, no separate rename message needed.
+-- Commas/semicolons are stripped since nicknames travel over the same
+-- delimited addon-message format as everything else.
 
 local MAX_NICK_LEN = 16
 
 function GW.SetNickname(raw)
-    local name = strtrim(raw or ""):gsub("[,;>]", "")
+    local name = strtrim(raw or ""):gsub("[,;]", "")
     if name == "" then
         print("|cffFFD700[GuildWordle]|r Current nickname: \"" ..
             (GuildWordleDB.settings.nickname or "") .. "\"  (use /wordle nick <name> to change it)")
@@ -274,27 +292,14 @@ function GW.SetNickname(raw)
     end
     if #name > MAX_NICK_LEN then name = name:sub(1, MAX_NICK_LEN) end
 
-    local oldName = GuildWordleDB.settings.nickname
-    if oldName == name then
+    if GuildWordleDB.settings.nickname == name then
         print("|cffFFD700[GuildWordle]|r Nickname is already \"" .. name .. "\".")
         return
     end
 
     GuildWordleDB.settings.nickname = name
-
-    -- Remove the stale entry under the old nickname from every guild bucket
-    -- we know about locally (an account can have entries across multiple
-    -- guilds from different alts), so a rename doesn't leave a duplicate row
-    -- sitting in the streak leaderboard under the old name.
-    if oldName and oldName ~= "" then
-        for _, board in pairs(GuildWordleDB.streakBoard) do
-            board[oldName] = nil
-        end
-    end
-
     print("|cffFFD700[GuildWordle]|r Nickname set to \"" .. name .. "\".")
     if GW.OnNicknameChanged then GW.OnNicknameChanged() end
-    GW.BroadcastNicknameRename(oldName, name)
     GW.BroadcastStreak()
 end
 
@@ -484,18 +489,22 @@ function GW.BroadcastKnownResults()
 end
 
 -- ── Streak leaderboard (gossip) ───────────────────────────────────────────────
--- Same gossip shape as GW.BroadcastKnownResults above, but keyed by nickname
--- instead of character name (since the streak itself is account-wide) and not
--- date-scoped (a streak isn't "today's" data the way a guess result is).
+-- Same gossip shape as GW.BroadcastKnownResults above, but keyed by the
+-- stable per-account accountId (see InitDB) rather than character name,
+-- since the streak itself is account-wide — and not date-scoped, since a
+-- streak isn't "today's" data the way a guess result is. The player-facing
+-- nickname rides along as a plain field inside each entry, so renaming is
+-- just an ordinary field update on the existing key, not a new entry.
 
 -- Writes this account's own live streak into the local per-guild streak
--- board under its current nickname, so it shows up in its own ranking
--- immediately — not just after a round-trip through guild chat.
+-- board under its accountId, so it shows up in its own ranking immediately —
+-- not just after a round-trip through guild chat.
 function GW.RecordOwnStreakEntry()
     local guildKey = GW.CurrentGuildKey()
     local s        = GW.CurrentStreak()
     GuildWordleDB.streakBoard[guildKey] = GuildWordleDB.streakBoard[guildKey] or {}
-    GuildWordleDB.streakBoard[guildKey][GuildWordleDB.settings.nickname] = {
+    GuildWordleDB.streakBoard[guildKey][GuildWordleDB.accountId] = {
+        nickname = GuildWordleDB.settings.nickname,
         current = s.current, best = s.best, lastDate = s.lastDate or "0",
     }
 end
@@ -516,8 +525,8 @@ function GW.BroadcastStreak()
         end
     end
 
-    for nick, d in pairs(board) do
-        local entry = string.format("%s,%d,%d,%s", nick, d.current, d.best, d.lastDate or "0")
+    for id, d in pairs(board) do
+        local entry = string.format("%s,%s,%d,%d,%s", id, d.nickname or "", d.current, d.best, d.lastDate or "0")
         if batchLen + #entry + 1 > MAX_MSG_LEN and #batch > 0 then
             flush()
         end
@@ -525,17 +534,6 @@ function GW.BroadcastStreak()
         batchLen = batchLen + #entry + 1
     end
     flush()
-end
-
--- One-shot notice so other clients prune their copy of our old nickname's
--- streak-board entry instead of it lingering as a stale duplicate forever —
--- there's no periodic re-send of this (unlike the two functions above), so a
--- client that's offline when the rename happens simply won't see it; that's
--- an accepted gap given how rarely nicknames actually change.
-function GW.BroadcastNicknameRename(oldNick, newNick)
-    if not IsInGuild() then return end
-    if not oldNick or oldNick == "" or oldNick == newNick then return end
-    SendAddonMsg("NICKRENAME:" .. oldNick .. ">" .. newNick)
 end
 
 local function HandleAddonMessage(prefix, text, channel, sender)
@@ -580,21 +578,22 @@ local function HandleAddonMessage(prefix, text, channel, sender)
             GuildWordleDB.streakBoard[guildKey] = GuildWordleDB.streakBoard[guildKey] or {}
             local board = GuildWordleDB.streakBoard[guildKey]
             for entry in rest:gmatch("[^;]+") do
-                local rNick, rCur, rBest, rDate = entry:match("^([^,]+),(%d+),(%d+),(%d+)$")
-                if rNick then
-                    local existing = board[rNick]
+                local rId, rNick, rCur, rBest, rDate = entry:match("^([^,]+),([^,]*),(%d+),(%d+),(%d+)$")
+                if rId then
+                    local existing = board[rId]
                     -- "best" only ever moves up, regardless of message freshness.
                     local newBest = tonumber(rBest)
                     if existing and existing.best and existing.best > newBest then
                         newBest = existing.best
                     end
-                    -- Only accept the incoming "current" if it's at least as
-                    -- fresh (same-or-later lastDate) as what we already have —
-                    -- otherwise a delayed/stale gossip echo could make an
-                    -- already-broken streak appear active again. Dates are
+                    -- Only accept the incoming "current"/"nickname" if it's at
+                    -- least as fresh (same-or-later lastDate) as what we
+                    -- already have — otherwise a delayed/stale gossip echo
+                    -- could make an already-broken streak appear active again,
+                    -- or roll a rename back to the old name. Dates are
                     -- YYYYMMDD strings, so lexical >= is numerically correct.
                     if not existing or rDate >= (existing.lastDate or "0") then
-                        board[rNick] = { current = tonumber(rCur), best = newBest, lastDate = rDate }
+                        board[rId] = { nickname = rNick, current = tonumber(rCur), best = newBest, lastDate = rDate }
                         changed = true
                     elseif newBest > (existing.best or 0) then
                         existing.best = newBest
@@ -603,16 +602,6 @@ local function HandleAddonMessage(prefix, text, channel, sender)
                 end
             end
             if changed and GW.OnStreakBoardUpdate then GW.OnStreakBoardUpdate() end
-        end
-
-    elseif text:sub(1,11) == "NICKRENAME:" then
-        local oldNick, newNick = text:sub(12):match("^([^>]+)>([^>]*)$")
-        if oldNick then
-            local board = GuildWordleDB.streakBoard[GW.CurrentGuildKey()]
-            if board and board[oldNick] then
-                board[oldNick] = nil
-                if GW.OnStreakBoardUpdate then GW.OnStreakBoardUpdate() end
-            end
         end
     end
 end
