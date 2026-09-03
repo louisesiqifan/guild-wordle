@@ -321,21 +321,56 @@ T.suite("4 Dev panel", function()
             "but with no games played, RESULTS should report nothing to share")
     end)
 
-    T.test("DEV-12: dev panel visibility follows the devMode flag", function()
+    T.test("DEV-12: the panel opens and closes on demand, reusing the frame", function()
         setup()
-        T.assertNoThrow(function() GW.SetDevPanelShown(true) end)
-        T.assertNoThrow(function() GW.SetDevPanelShown(false) end)
+        GW.SetDevPanelShown(true)
+        T.assertTrue(GW.IsDevPanelShown(), "should be open")
+        GW.SetDevPanelShown(false)
+        T.assertFalse(GW.IsDevPanelShown(), "should be closed")
         -- Re-showing after a hide must not error (frame is reused, not rebuilt).
         T.assertNoThrow(function() GW.SetDevPanelShown(true) end)
+        T.assertTrue(GW.IsDevPanelShown())
+        GW.SetDevPanelShown(false)
     end)
 
-    T.test("DEV-13: /wordle dev toggles devMode and drives the panel together", function()
+    T.test("DEV-13: /wordle dev toggles devMode WITHOUT opening the panel", function()
+        -- Dev mode's job is to reveal the Dev button; the button opens the
+        -- panel. Auto-opening on every reload (devMode persists) was more
+        -- annoying than useful.
         setup()
         GuildWordleDB.settings.devMode = false
+        GW.SetDevPanelShown(false)
+
         GW._test.HandleSlashCommand("dev")
         T.assertEquals(GuildWordleDB.settings.devMode, true, "dev mode should turn on")
+        T.assertFalse(GW.IsDevPanelShown(), "but the panel must NOT open by itself")
+
         GW._test.HandleSlashCommand("dev")
         T.assertEquals(GuildWordleDB.settings.devMode, false, "and back off")
+    end)
+
+    T.test("DEV-13b: leaving dev mode closes an open panel", function()
+        -- Otherwise the panel would be stranded: the Dev button that reopens
+        -- it is hidden along with dev mode.
+        setup()
+        GuildWordleDB.settings.devMode = true
+        GW.SetDevPanelShown(true)
+        T.assertTrue(GW.IsDevPanelShown(), "precondition: panel is open")
+
+        GW._test.HandleSlashCommand("dev")   -- toggles dev mode off
+        T.assertEquals(GuildWordleDB.settings.devMode, false)
+        T.assertFalse(GW.IsDevPanelShown(), "panel must close with dev mode")
+    end)
+
+    T.test("DEV-13c: closing the panel does NOT leave dev mode", function()
+        -- The inverse of DEV-13b: the X button just closes the window, and
+        -- the Dev button stays available to reopen it.
+        setup()
+        GuildWordleDB.settings.devMode = true
+        GW.SetDevPanelShown(true)
+        GW.SetDevPanelShown(false)
+        T.assertEquals(GuildWordleDB.settings.devMode, true,
+            "closing the panel must not silently exit dev mode")
     end)
 
 end)
