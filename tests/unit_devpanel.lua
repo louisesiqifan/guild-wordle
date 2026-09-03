@@ -1,0 +1,420 @@
+-- Spec: BEHAVIOR_SPEC.md section 4 (Dev panel)
+--
+-- The dev panel exists to make manual UAT trustworthy, so its own injection
+-- logic has to be trustworthy first: a malformed message string would show
+-- nothing in-game and read as "the feature is broken" rather than "the test
+-- tool is broken". These tests drive the same GW.DevActions the buttons do.
+local T = require("runner")
+local H = require("harness")
+local GW, Mock = H.GW, H.Mock
+
+local GUILD = "Testguild"
+local A = GW.DevActions
+
+local function setup()
+    H.freshDB()
+    Mock.guildName = GUILD
+    H.setDate(2026, 3, 15)
+    Mock.unitName = "Realchar"
+end
+
+local function todayBoard()
+    local byGuild = GuildWordleDB.leaderboard[GUILD]
+    return (byGuild and byGuild[H.dateStr()]) or {}
+end
+
+local function countKeys(t)
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
+T.suite("4 Dev panel", function()
+
+    T.test("DEV-01: injected results land as real leaderboard entries", function()
+        setup()
+        A.addOne()
+        local board = todayBoard()
+        T.assertEquals(countKeys(board), 1, "exactly one fake entry")
+        local name, entry = next(board)
+        T.assertContains(name, "Zzt", "fake entries must carry the identifying prefix")
+        T.assertEquals(entry.solved, true)
+        T.assertEquals(entry.guesses, 2)
+        T.assertTrue(entry.pattern ~= nil and entry.pattern ~= "", "pattern must survive the round-trip")
+    end)
+
+    T.test("DEV-02: injected nicknames resolve for the injected characters", function()
+        setup()
+        A.addOne()
+        local names = GuildWordleDB.charNicknames[GUILD]
+        local charName = next(todayBoard())
+        T.assertEquals(names[charName], "Alphanick",
+            "the results row should resolve to a nickname, exercising the display path")
+    end)
+
+    T.test("DEV-03: the 8-result set covers both solved and unsolved, for sort testing", function()
+        setup()
+        A.addEight()
+        local board = todayBoard()
+        T.assertEquals(countKeys(board), 8)
+        local solved, unsolved = 0, 0
+        for _, e in pairs(board) do
+            if e.solved then solved = solved + 1 else unsolved = unsolved + 1 end
+        end
+        T.assertTrue(solved > 0, "need solved entries to test sort order")
+        T.assertTrue(unsolved > 0, "need unsolved entries to test that they sort last")
+    end)
+
+    T.test("DEV-04: the scroll set produces 30 distinct entries", function()
+        setup()
+        A.addManyForScroll()
+        T.assertEquals(countKeys(todayBoard()), 30,
+            "30 distinct rows are needed to exercise scrolling and the row-pool cap")
+    end)
+
+    T.test("DEV-05: edge-case names arrive intact for truncation/UTF-8 checks", function()
+        setup()
+        A.addEdgeNames()
+        local names = GuildWordleDB.charNicknames[GUILD]
+        local found = {}
+        for _, nick in pairs(names) do found[nick] = true end
+        T.assertTrue(found["Averyverylongnicknameindeed"], "over-length name should arrive unmodified")
+        T.assertTrue(found["Exactlyfifteen"], "boundary-length name should arrive")
+        T.assertTrue(found["Bonni\195\169Ren\195\169e"], "accented name should survive the wire round-trip")
+
+        -- The point of the long name is that the UI truncates it for display;
+        -- verify the truncation helper the UI uses handles it cleanly.
+        local truncated = GW.TruncateUTF8("Averyverylongnicknameindeed", 15)
+        T.assertEquals(#truncated, 15)
+        local accentTrunc = GW.TruncateUTF8("Bonni\195\169Ren\195\169e", 15)
+        T.assertFalse(accentTrunc:sub(-1) == "\195", "must never end on a dangling UTF-8 lead byte")
+    end)
+
+    T.test("DEV-06: streak injection yields both active and broken entries", function()
+        setup()
+        A.addStreaks()
+        local board = GuildWordleDB.streakBoard[GUILD]
+        T.assertEquals(countKeys(board), 5)
+        local active, brokenWithBest = 0, 0
+        for _, e in pairs(board) do
+            if e.current > 0 then active = active + 1 end
+            if e.current == 0 and e.best > 0 then brokenWithBest = brokenWithBest + 1 end
+        end
+        T.assertEquals(active, 3, "'Streak' tab should have 3 rows to show")
+        T.assertEquals(brokenWithBest, 2,
+            "and 2 broken-but-with-a-best, which must appear only on 'Best'")
+    end)
+
+    T.test("DEV-07: simulated rename updates in place rather than duplicating", function()
+        setup()
+        A.addEight()
+        local before = countKeys(GuildWordleDB.charNicknames[GUILD])
+        A.simulateRename()
+        local names = GuildWordleDB.charNicknames[GUILD]
+        T.assertEquals(countKeys(names), before, "a rename must not add a row")
+        local found = false
+        for _, nick in pairs(names) do
+            if nick == "RenamedAlpha" then found = true end
+            T.assertNotEquals(nick, "Alphanick", "the old nickname must be gone, not duplicated")
+        end
+        T.assertTrue(found, "the new nickname should be present")
+    end)
+
+    T.test("DEV-07b (regression): the rename reaches the streak board too, not just Today", function()
+        -- The results board LOOKS UP the nickname from charNicknames; the
+        -- streak board STORES it as a field. A rename that only sends NICKS:
+        -- updates the first and leaves the second showing the old name --
+        -- a state no real client can produce, since GW.SetNickname always
+        -- broadcasts both. This is exactly what shipped broken.
+        setup()
+        A.addEight()
+        A.addStreaks()
+
+        local board = GuildWordleDB.streakBoard[GUILD]
+        local alphaKey
+        for k, e in pairs(board) do
+            if e.nickname == "Alphanick" then alphaKey = k end
+        end
+        T.assertTrue(alphaKey ~= nil, "precondition: a streak entry named Alphanick exists")
+
+        A.simulateRename()
+
+        T.assertEquals(board[alphaKey].nickname, "RenamedAlpha",
+            "the streak board entry must pick up the new name, not keep the old one")
+        for _, nick in pairs(GuildWordleDB.charNicknames[GUILD]) do
+            T.assertNotEquals(nick, "Alphanick", "and the results-side lookup must update too")
+        end
+    end)
+
+    T.test("DEV-08: the stale-echo action cannot revive a broken streak", function()
+        setup()
+        A.addStreaks()
+        local board = GuildWordleDB.streakBoard[GUILD]
+        local charlieKey
+        for k, e in pairs(board) do
+            if e.nickname == "Charlienick" then charlieKey = k end
+        end
+        T.assertTrue(charlieKey ~= nil, "precondition: Charlienick exists")
+        T.assertEquals(board[charlieKey].current, 0, "precondition: their streak is broken")
+
+        A.simulateStaleEcho()
+
+        T.assertEquals(board[charlieKey].current, 0,
+            "a 3-day-old echo must not resurrect the streak -- this is the bug the action demonstrates")
+        T.assertEquals(board[charlieKey].best, 99,
+            "but best-only-increases still applies, so best should rise")
+    end)
+
+    T.test("DEV-09: forced win/loss produce a coherent finished game", function()
+        setup()
+        A.winToday()
+        local g = GW.CurrentGame()
+        T.assertEquals(g.state, "won")
+        T.assertEquals(#g.guesses, #g.results, "lengths must match or CurrentGame() would wipe it")
+        T.assertTrue(todayBoard()["Realchar"] ~= nil, "own result should be on the board")
+        T.assertEquals(todayBoard()["Realchar"].solved, true)
+
+        setup()
+        A.loseToday()
+        local g2 = GW.CurrentGame()
+        T.assertEquals(g2.state, "lost")
+        T.assertEquals(#g2.guesses, #g2.results)
+        T.assertEquals(todayBoard()["Realchar"].solved, false)
+    end)
+
+    T.test("DEV-10: streak helpers set and break the streak as advertised", function()
+        setup()
+        A.setStreak()
+        local s = GW.CurrentStreak()
+        T.assertEquals(s.current, 5)
+        T.assertEquals(s.best, 10)
+
+        setup()
+        A.breakStreak()
+        T.assertEquals(GW.CurrentStreak().current, 0,
+            "a 3-day-stale lastDate should read as broken immediately")
+        T.assertEquals(GuildWordleDB.streak.best, 10, "best survives")
+    end)
+
+    T.test("DEV-10b (regression): streak helpers also push onto the streak board", function()
+        -- Setting your own streak has to reach the guild streak board too,
+        -- or the tabs keep showing whatever was there before.
+        setup()
+        GuildWordleDB.accountId = "MyAcct"
+        A.setStreak()
+        local mine = GuildWordleDB.streakBoard[GUILD]["MyAcct"]
+        T.assertTrue(mine ~= nil, "own streak entry should exist on the board")
+        T.assertEquals(mine.current, 5)
+        T.assertEquals(mine.best, 10)
+
+        A.breakStreak()
+        mine = GuildWordleDB.streakBoard[GUILD]["MyAcct"]
+        T.assertEquals(mine.current, 0, "board entry should reflect the broken streak")
+        T.assertEquals(mine.best, 10)
+    end)
+
+    T.test("DEV-10c (regression): local-state actions trigger a full-window refresh", function()
+        -- The left-column streak label is refreshed by a file-local function
+        -- in GuildWordle_UI.lua that only runs on frame-show; without a
+        -- full-window refresh hook these actions updated the panel but left
+        -- the label stale until the window was closed and reopened.
+        setup()
+        local calls = 0
+        local real = GW.RefreshMainUI
+        GW.RefreshMainUI = function() calls = calls + 1 end
+
+        A.setStreak()
+        T.assertEquals(calls, 1, "setStreak must refresh the whole window")
+        A.breakStreak()
+        T.assertEquals(calls, 2, "breakStreak must too")
+        A.winToday()
+        T.assertEquals(calls, 3, "and so must a forced win")
+        setup(); GW.RefreshMainUI = function() calls = calls + 1 end
+        A.loseToday()
+        T.assertEquals(calls, 4, "and a forced loss")
+
+        GW.RefreshMainUI = real
+    end)
+
+    T.test("DEV-11: 'clear fakes' removes every fake and nothing real", function()
+        setup()
+        -- A real player's result and nickname, alongside the fakes.
+        A.winToday()
+        A.addEight()
+        A.addStreaks()
+        GuildWordleDB.charNicknames[GUILD]["Realchar"] = "Realnick"
+        T.assertTrue(countKeys(todayBoard()) > 1)
+
+        A.clearFakes()
+
+        for name in pairs(todayBoard()) do
+            T.assertFalse(name:sub(1, 3) == "Zzt", "fake leaderboard entry survived: " .. name)
+        end
+        for key in pairs(GuildWordleDB.streakBoard[GUILD]) do
+            T.assertFalse(key:sub(1, 3) == "Zzt", "fake streak entry survived: " .. key)
+        end
+        for name in pairs(GuildWordleDB.charNicknames[GUILD]) do
+            T.assertFalse(name:sub(1, 3) == "Zzt", "fake nickname survived: " .. name)
+        end
+        T.assertTrue(todayBoard()["Realchar"] ~= nil, "the real result must be preserved")
+        T.assertEquals(GuildWordleDB.charNicknames[GUILD]["Realchar"], "Realnick",
+            "the real nickname must be preserved")
+    end)
+
+    T.test("DEV-14: SYNC_REQ preview reports the payload without transmitting", function()
+        -- The point of the preview: it has to work for a guildless test
+        -- character, where every broadcast function early-returns and the
+        -- action would otherwise appear to do nothing at all.
+        setup()
+        Mock.guildName = nil          -- explicitly NOT in a guild
+        A.addEight()
+        A.addStreaks()
+
+        Mock.printed = {}
+        Mock.sentAddon = {}
+        A.simulateSyncReq()
+
+        T.assertEquals(#Mock.sentAddon, 0, "preview must not actually transmit anything")
+
+        local out = table.concat(Mock.printed, "\n")
+        T.assertContains(out, "RESULTS", "should report the RESULTS payload")
+        T.assertContains(out, "NICKS",   "should report the NICKS payload")
+        T.assertContains(out, "STREAKS", "should report the STREAKS payload")
+    end)
+
+    T.test("DEV-14b: SYNC_REQ preview restores IsInGuild afterwards, even on error", function()
+        -- IsInGuild is a Blizzard global other addons read; leaving it
+        -- overridden would silently corrupt the whole session.
+        setup()
+        Mock.guildName = nil
+        local before = _G.IsInGuild
+        T.assertFalse(_G.IsInGuild(), "precondition: not in a guild")
+
+        A.simulateSyncReq()
+        T.assertSame(_G.IsInGuild, before, "global must be restored")
+        T.assertFalse(_G.IsInGuild(), "and must report not-in-guild again")
+
+        -- Now force the captured call to throw partway through.
+        local realStreak = GW.BroadcastStreak
+        GW.BroadcastStreak = function() error("boom") end
+        pcall(A.simulateSyncReq)
+        GW.BroadcastStreak = realStreak
+
+        T.assertSame(_G.IsInGuild, before, "global must be restored on the error path too")
+        T.assertFalse(_G.IsInGuild())
+    end)
+
+    T.test("DEV-14c: a client with no data still shares its own identity", function()
+        -- Worth pinning down: the reply is never actually empty, because
+        -- BroadcastStreak/BroadcastCharNicknames call RecordOwnStreakEntry /
+        -- RecordOwnCharNickname first, so a brand-new client still announces
+        -- its own (zero) streak and nickname. RESULTS is the only one of the
+        -- three that can legitimately have nothing to send.
+        setup()
+        Mock.guildName = nil
+        Mock.printed = {}
+        A.simulateSyncReq()
+        local out = table.concat(Mock.printed, "\n")
+        T.assertContains(out, "STREAKS", "own streak entry is always shared")
+        T.assertContains(out, "NICKS",   "own nickname is always shared")
+        T.assertContains(out, "RESULTS|r x0",
+            "but with no games played, RESULTS should report nothing to share")
+    end)
+
+    T.test("DEV-15: the real round-trip probe sends genuine traffic, not a fake result", function()
+        setup()
+        Mock.sentAddon = {}
+        A.realRoundTrip()
+        T.assertEquals(#Mock.sentAddon, 1, "should send exactly one message")
+        local m = Mock.sentAddon[1]
+        T.assertEquals(m.text, "SYNC_REQ",
+            "must probe with ordinary SYNC_REQ traffic -- a fake RESULTS: would put a "
+            .. "bogus player on real guildmates' leaderboards")
+        T.assertEquals(m.channel, "GUILD")
+        T.assertEquals(m.prefix, "GUILDWORDLE")
+    end)
+
+    T.test("DEV-15b: the probe refuses to run outside a guild instead of failing silently", function()
+        setup()
+        Mock.guildName = nil
+        Mock.sentAddon = {}
+        Mock.printed = {}
+        A.realRoundTrip()
+        T.assertEquals(#Mock.sentAddon, 0, "nothing to send without a guild")
+        local out = table.concat(Mock.printed, "\n")
+        T.assertContains(out, "Not in a guild", "and it should say why")
+    end)
+
+    T.test("DEV-15c: the probe reports success when the echo arrives", function()
+        -- The mock fires C_Timer.After synchronously, so the verdict is
+        -- decided before this returns. Simulate WoW echoing the message back
+        -- by driving the addon's own event dispatch.
+        setup()
+        Mock.printed = {}
+        local realAfter = C_Timer.After
+        local pending
+        C_Timer.After = function(_, fn) pending = fn end   -- defer the verdict
+        A.realRoundTrip()
+        H.fireEvent("CHAT_MSG_ADDON", "GUILDWORDLE", "SYNC_REQ", "GUILD", "Realchar-Testrealm")
+        if pending then pending() end
+        C_Timer.After = realAfter
+
+        local out = table.concat(Mock.printed, "\n")
+        T.assertContains(out, "Round trip OK", "an arriving echo should be reported as success")
+    end)
+
+    T.test("DEV-12: the panel opens and closes on demand, reusing the frame", function()
+        setup()
+        GW.SetDevPanelShown(true)
+        T.assertTrue(GW.IsDevPanelShown(), "should be open")
+        GW.SetDevPanelShown(false)
+        T.assertFalse(GW.IsDevPanelShown(), "should be closed")
+        -- Re-showing after a hide must not error (frame is reused, not rebuilt).
+        T.assertNoThrow(function() GW.SetDevPanelShown(true) end)
+        T.assertTrue(GW.IsDevPanelShown())
+        GW.SetDevPanelShown(false)
+    end)
+
+    T.test("DEV-13: /wordle dev toggles devMode WITHOUT opening the panel", function()
+        -- Dev mode's job is to reveal the Dev button; the button opens the
+        -- panel. Auto-opening on every reload (devMode persists) was more
+        -- annoying than useful.
+        setup()
+        GuildWordleDB.settings.devMode = false
+        GW.SetDevPanelShown(false)
+
+        GW._test.HandleSlashCommand("dev")
+        T.assertEquals(GuildWordleDB.settings.devMode, true, "dev mode should turn on")
+        T.assertFalse(GW.IsDevPanelShown(), "but the panel must NOT open by itself")
+
+        GW._test.HandleSlashCommand("dev")
+        T.assertEquals(GuildWordleDB.settings.devMode, false, "and back off")
+    end)
+
+    T.test("DEV-13b: leaving dev mode closes an open panel", function()
+        -- Otherwise the panel would be stranded: the Dev button that reopens
+        -- it is hidden along with dev mode.
+        setup()
+        GuildWordleDB.settings.devMode = true
+        GW.SetDevPanelShown(true)
+        T.assertTrue(GW.IsDevPanelShown(), "precondition: panel is open")
+
+        GW._test.HandleSlashCommand("dev")   -- toggles dev mode off
+        T.assertEquals(GuildWordleDB.settings.devMode, false)
+        T.assertFalse(GW.IsDevPanelShown(), "panel must close with dev mode")
+    end)
+
+    T.test("DEV-13c: closing the panel does NOT leave dev mode", function()
+        -- The inverse of DEV-13b: the X button just closes the window, and
+        -- the Dev button stays available to reopen it.
+        setup()
+        GuildWordleDB.settings.devMode = true
+        GW.SetDevPanelShown(true)
+        GW.SetDevPanelShown(false)
+        T.assertEquals(GuildWordleDB.settings.devMode, true,
+            "closing the panel must not silently exit dev mode")
+    end)
+
+end)
+
+T.run()
