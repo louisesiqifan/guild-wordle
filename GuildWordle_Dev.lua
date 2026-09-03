@@ -523,25 +523,25 @@ local function BuildPanel()
         y = y - 4
     end
 
-    -- Closing via the X must leave dev mode too, otherwise devMode and panel
-    -- visibility drift apart and "dev mode == panel is up" stops being true.
+    -- Closing the panel drops isolation but deliberately leaves dev mode ON:
+    -- the Dev button on the main window is what reopens it, so exiting dev
+    -- mode here would hide the very control needed to get back in.
     f:SetScript("OnHide", function()
         if isolated then
             setIsolated(false)
-            say("Panel closed -- Isolate off, normal broadcasting resumed.")
-        end
-        if GuildWordleDB and GuildWordleDB.settings and GuildWordleDB.settings.devMode then
-            GuildWordleDB.settings.devMode = false
-            say("Dev mode |cffff4444OFF|r.")
+            say("Panel closed -- Isolate off, normal broadcasting resumed. "
+                .. "Reopen with the Dev button, or /wordle dev to leave dev mode.")
         end
     end)
 
     return f
 end
 
--- Driven by /wordle dev (see GuildWordle.lua's slash handler) and by the
--- persisted devMode flag at login, so the panel's visibility always matches
--- "am I in dev mode" rather than being a second thing to toggle.
+-- Driven by the Dev button on the main window (GuildWordle_UI.lua), and by
+-- /wordle dev when it turns dev mode OFF. Deliberately NOT called on login:
+-- devMode persists, and a debug window reappearing on every reload is more
+-- annoying than useful. Dev mode's job is to reveal the button; the button's
+-- job is to open the panel.
 function GW.SetDevPanelShown(show)
     if show then
         if not panel then panel = BuildPanel() end
@@ -555,17 +555,6 @@ function GW.SetDevPanelShown(show)
     end
 end
 
--- Restores the panel on login/reload when dev mode was left on. Deferred a
--- few seconds for the same reason the addon's own login sync is: guild info
--- isn't populated immediately, and several panel actions read it.
-local devInit = CreateFrame("Frame")
-devInit:RegisterEvent("PLAYER_LOGIN")
-devInit:SetScript("OnEvent", function()
-    if C_Timer and C_Timer.After then
-        C_Timer.After(6, function()
-            if GuildWordleDB and GuildWordleDB.settings and GuildWordleDB.settings.devMode then
-                GW.SetDevPanelShown(true)
-            end
-        end)
-    end
-end)
+function GW.IsDevPanelShown()
+    return panel ~= nil and panel:IsShown()
+end
