@@ -1,6 +1,6 @@
 # GuildWordle — Expected Behavior Specification
 
-Status: **reviewed and implemented.** Sections 1, 2, 4 and 5 are automated (149 tests,
+Status: **reviewed and implemented.** Sections 1, 2, 4 and 5 are automated (151 tests,
 `./tests/run_all.sh`); section 3 is a manual in-game checklist, driven by the dev panel described in
 section 4. Tests reference these IDs by name, so this file stays the source of truth: **add the
 spec entry before writing the test.**
@@ -740,6 +740,15 @@ by design — a broken render would otherwise register as a pass.
   `SafeUpdateLBPanel`, not propagated to the caller.
 - **UI-11**: A rename mid-session re-renders without error and refreshes the nickname lookup
   synchronously.
+- **UI-12**: The streak label always says *something*. A brand-new account — or one just wiped by
+  the dev panel's "Clear ALL data" — has `current` and `best` both 0, which previously rendered as
+  the empty string; that's indistinguishable from the label having failed to update, so it now
+  reads "No streak yet". Same for a missing streak table.
+- **UI-13**: Label wording covers all three states — active (`N-days streak (best M)`), broken
+  (`Streak broken (best M)`, which since the participation change means a *skipped day*, never a
+  loss), and the singular case (`1-day streak`, not `1-days`) — which is now the common first-play
+  result. Formatting lives in the pure `GW.StreakLabelText(s)` so it's testable without a live
+  FontString; `RefreshStreakLabel` is just the widget call around it.
 
 ---
 
