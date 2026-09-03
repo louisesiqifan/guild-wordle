@@ -4,3 +4,11 @@ ignore:
   - .gitignore
   - README.md
   - LICENSE
+  # Developer-only; would otherwise ship to every CurseForge user. The test
+  # files aren't listed in the .toc so the client would never load them, but
+  # the dev panel is deliberately dropped here AND stripped from the .toc
+  # (see its #@debug@ markers) so released builds neither ship it nor
+  # reference a missing file.
+  - tests
+  - CLAUDE.md
+  - GuildWordle_Dev.lua
