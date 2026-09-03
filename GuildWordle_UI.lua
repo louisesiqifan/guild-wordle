@@ -139,15 +139,26 @@ streakLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -42)
 streakLabel:SetWidth(GAME_W)
 streakLabel:SetJustifyH("CENTER")
 
-local function RefreshStreakLabel()
-    local s = GW.CurrentStreak()
-    if not s or (s.current == 0 and s.best == 0) then
-        streakLabel:SetText("")
-    elseif s.current > 0 then
-        streakLabel:SetText(string.format("|cffE8B84B%d-day streak|r  (best %d)", s.current, s.best))
+-- Pure formatter, kept separate from the widget so the wording is testable
+-- without a live FontString (the test mock has no real text storage).
+--
+-- A brand-new account (current and best both 0) previously rendered as the
+-- empty string, which just looked like a missing line -- indistinguishable
+-- from the label having failed to update. It now says so explicitly.
+function GW.StreakLabelText(s)
+    if not s then return "|cff888888No streak yet|r" end
+    if s.current > 0 then
+        local day = (s.current == 1) and "day" or "days"
+        return string.format("|cffE8B84B%d-%s streak|r  (best %d)", s.current, day, s.best)
+    elseif (s.best or 0) > 0 then
+        return string.format("|cff888888Streak broken|r  (best %d)", s.best)
     else
-        streakLabel:SetText(string.format("|cff888888Streak broken|r  (best %d)", s.best))
+        return "|cff888888No streak yet|r"
     end
+end
+
+local function RefreshStreakLabel()
+    streakLabel:SetText(GW.StreakLabelText(GW.CurrentStreak()))
 end
 
 -- Tile grid
