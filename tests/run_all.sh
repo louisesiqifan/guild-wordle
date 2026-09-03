@@ -29,6 +29,7 @@ FILES=(
     unit_devpanel.lua
     unit_ui.lua
     integration.lua
+    unit_gatecheck.lua
 )
 
 total_failed=0
