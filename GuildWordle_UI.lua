@@ -431,8 +431,13 @@ local function RenderRows(sorted, rowTextFn, entryFn)
     lbScrollChild:SetHeight(math.max(VISIBLE_ROWS, math.min(#sorted, ROW_POOL_SIZE)) * LB_ROW_H)
 end
 
+-- Uses GW.TruncateUTF8 (character-based, not byte-based) rather than a plain
+-- sub() since nicknames can contain accented/non-ASCII letters, where a
+-- byte-based cut could split a multi-byte character in half.
 local function TruncName(name)
-    return #name > 9 and (name:sub(1,8) .. ".") or name
+    local kept9 = GW.TruncateUTF8(name, 9)
+    if kept9 == name then return name end
+    return GW.TruncateUTF8(name, 8) .. "."
 end
 
 local function RenderResultsTab()
