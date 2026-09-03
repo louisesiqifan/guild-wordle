@@ -225,10 +225,22 @@ function Actions.simulateRename()
     -- The interaction that caused a real bug: a guildmate renames, and every
     -- client that already had their old nickname must update in place rather
     -- than growing a duplicate row.
+    --
+    -- A real rename sends BOTH message types (GW.SetNickname calls
+    -- BroadcastCharNicknames *and* BroadcastStreak), because the two boards
+    -- carry the nickname differently: the results board looks it up from
+    -- charNicknames, while the streak board stores it as a field on the
+    -- entry. Sending only NICKS: -- as this action first did -- updates the
+    -- Today tab while leaving the Streak/Best tabs showing the old name,
+    -- which is not a state any real client can actually produce.
     local f = FAKES[1]
-    injectNicks({{char = f.char, nick = "RenamedAlpha"}})
-    say("Simulated rename of " .. f.nick .. " -> RenamedAlpha. The existing row should "
-        .. "change name in place, NOT duplicate.")
+    local newNick = "RenamedAlpha"
+    injectNicks({{char = f.char, nick = newNick}})
+    -- Matching streak entry, keyed the way Actions.addStreaks keys it.
+    inject("STREAKS:" .. FAKE_PREFIX .. "acctAlpha," .. newNick .. ",12,12," .. today())
+    say("Simulated rename of " .. f.nick .. " -> " .. newNick
+        .. ". Check BOTH the Today tab and the Streak/Best tabs: the name should change "
+        .. "in place, NOT duplicate.")
 end
 
 function Actions.simulateStaleEcho()
@@ -252,6 +264,19 @@ function Actions.simulateSyncReq()
     say("Simulated an incoming SYNC_REQ -- your client should rebroadcast everything it knows.")
 end
 
+-- Anything that changes local state out-of-band has to refresh the whole
+-- window, not just the leaderboard panel: the streak label, share button and
+-- grid are all refreshed by file-local functions in GuildWordle_UI.lua that
+-- otherwise only run on frame-show. GW.OnStreakBoardUpdate alone repaints
+-- the tabbed panel and leaves the left column stale.
+local function refreshEverything()
+    if GW.RefreshMainUI then
+        GW.RefreshMainUI()
+    elseif GW.OnStreakBoardUpdate then
+        GW.OnStreakBoardUpdate()   -- older UI file without the hook
+    end
+end
+
 function Actions.winToday()
     local g = GW.CurrentGame()
     -- guesses and results must stay the same length or CurrentGame()'s
@@ -260,7 +285,8 @@ function Actions.winToday()
     g.results = {{1,0,0,1,0}, {2,2,2,2,2}}
     g.state   = "won"
     GW.OnGameEnd(true)
-    say("Forced a WIN for today. Reopen the window to see the end-of-game state.")
+    refreshEverything()
+    say("Forced a WIN for today.")
 end
 
 function Actions.loseToday()
@@ -270,25 +296,30 @@ function Actions.loseToday()
     for i = 1, 6 do g.results[i] = {0,0,0,0,0} end
     g.state = "lost"
     GW.OnGameEnd(false)
+    refreshEverything()
     say("Forced a LOSS for today. The word reveal should show the real answer.")
 end
 
 function Actions.setStreak()
     GuildWordleDB.streak = {current = 5, best = 10, lastDate = today()}
-    if GW.OnStreakBoardUpdate then GW.OnStreakBoardUpdate() end
-    say("Set your streak to 5 (best 10). Check the label above the grid and both streak tabs.")
+    GW.RecordOwnStreakEntry()   -- push it onto the streak board too
+    refreshEverything()
+    say("Set your streak to 5 (best 10). The label above the grid and both streak tabs "
+        .. "should update immediately.")
 end
 
 function Actions.breakStreak()
     -- lastDate older than yesterday: CurrentStreak() should zero it at read
     -- time, without needing another game to be played.
     GuildWordleDB.streak = {current = 6, best = 10, lastDate = daysAgo(3)}
-    if GW.OnStreakBoardUpdate then GW.OnStreakBoardUpdate() end
-    say("Set a STALE streak (last played 3 days ago). It should read as broken immediately.")
+    GW.RecordOwnStreakEntry()
+    refreshEverything()
+    say("Set a STALE streak (last played 3 days ago). The label should read 'Streak broken' "
+        .. "immediately, without reopening the window.")
 end
 
 function Actions.resetGame()
-    GW.ResetGame()
+    GW.ResetGame()   -- already re-shows the frame, which triggers a full refresh
 end
 
 function Actions.clearFakes()
