@@ -1,6 +1,6 @@
 # GuildWordle — Expected Behavior Specification
 
-Status: **reviewed and implemented.** Sections 1, 2, 4 and 5 are automated (146 tests,
+Status: **reviewed and implemented.** Sections 1, 2, 4 and 5 are automated (149 tests,
 `./tests/run_all.sh`); section 3 is a manual in-game checklist, driven by the dev panel described in
 section 4. Tests reference these IDs by name, so this file stays the source of truth: **add the
 spec entry before writing the test.**
@@ -699,6 +699,21 @@ broadcasting. Closing the panel also turns dev mode off, so "dev mode ⟺ panel 
   real data untouched.
 - **DEV-12/13**: Panel visibility follows `devMode`; `/wordle dev` toggles both together; re-showing
   after hiding reuses the frame rather than rebuilding it.
+- **DEV-14 (SYNC_REQ preview)**: `SYNC_REQ` is the one action that's about *outgoing* behavior —
+  a guildmate asking "catch me up", answered by re-broadcasting everything known. That's invisible
+  in the usual testing setup twice over: every broadcast function early-returns when not in a
+  guild (so a guildless test character sees nothing), and Isolate replaces those same functions
+  with no-ops (so even in a real guild there'd be nothing to watch). The action therefore
+  *captures* the outgoing messages rather than sending them, and prints the wire payload — which
+  works solo and with Isolate on. It reaches past Isolate to the stashed real broadcasters, so the
+  preview reflects genuine behavior.
+- **DEV-14b**: `IsInGuild` is temporarily forced true to get past those early-returns. It is a
+  Blizzard global other addons read, so it must be restored on **every** path including the error
+  path — verified by forcing a broadcast to throw mid-capture.
+- **DEV-14c**: The reply is never actually empty: `BroadcastStreak`/`BroadcastCharNicknames` call
+  `RecordOwnStreakEntry`/`RecordOwnCharNickname` first, so even a brand-new client announces its
+  own (zero) streak and nickname. `RESULTS` is the only one of the three that can legitimately
+  have nothing to send.
 
 ## 5. UI render robustness (`GuildWordle_UI.lua`, partial automation)
 
