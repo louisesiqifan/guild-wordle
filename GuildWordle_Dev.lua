@@ -251,17 +251,79 @@ function Actions.simulateStaleEcho()
         .. "'Streak' tab must NOT show it as active; 'Best' MAY rise to 99.")
 end
 
+-- Runs `fn` with outgoing addon messages captured instead of sent, and with
+-- IsInGuild() forced true, returning the list of message strings that WOULD
+-- have gone out.
+--
+-- Both overrides are needed to make outgoing behaviour observable at all in
+-- the common testing setup: every broadcast function early-returns when not
+-- in a guild (so a guildless test character sees literally nothing happen),
+-- and the panel's Isolate toggle replaces those same functions with no-ops
+-- (so even in a real guild there'd be nothing to watch). Capturing lets the
+-- action *show* the exact wire payload instead of depending on a second
+-- account to observe it.
+--
+-- Globals are restored in all paths, including on error -- IsInGuild is a
+-- Blizzard global that other addons read, so it must never stay overridden.
+local function captureOutgoing(fn)
+    local captured = {}
+    local function grab(prefix, text) captured[#captured + 1] = text end
+
+    local realIsInGuild = _G.IsInGuild
+    local realLegacySend = _G.SendAddonMessage
+    local realChatSend = C_ChatInfo and C_ChatInfo.SendAddonMessage
+
+    _G.IsInGuild = function() return true end
+    _G.SendAddonMessage = grab
+    if C_ChatInfo then C_ChatInfo.SendAddonMessage = grab end
+
+    local ok, err = pcall(fn)
+
+    _G.IsInGuild = realIsInGuild
+    _G.SendAddonMessage = realLegacySend
+    if C_ChatInfo then C_ChatInfo.SendAddonMessage = realChatSend end
+
+    if not ok then error(err, 0) end
+    return captured
+end
+
 function Actions.simulateSyncReq()
-    if not IsInGuild() then
-        say("|cffff4444Not in a guild -- SYNC_REQ handling is a no-op here.|r")
+    -- Isolate swaps the real broadcasters for no-ops; reach past it to the
+    -- originals so the preview reflects genuine behaviour either way.
+    local realResults = (savedBroadcasts and savedBroadcasts.results) or GW.BroadcastKnownResults
+    local realStreak  = (savedBroadcasts and savedBroadcasts.streak)  or GW.BroadcastStreak
+    local realNicks   = (savedBroadcasts and savedBroadcasts.nicks)   or GW.BroadcastCharNicknames
+
+    local sent = captureOutgoing(function()
+        realResults()
+        realStreak()
+        realNicks()
+    end)
+
+    if #sent == 0 then
+        say("SYNC_REQ reply would be EMPTY -- your client knows nothing to share yet. "
+            .. "Inject some results/streaks first, then try again.")
         return
     end
-    if isolated then
-        say("|cffff4444Isolate is ON, so the response won't actually send. "
-            .. "Turn it off to test real outgoing traffic.|r")
+
+    local kinds = {}
+    for _, text in ipairs(sent) do
+        local kind = text:match("^(%u+):") or "?"
+        kinds[kind] = (kinds[kind] or 0) + 1
     end
-    inject("SYNC_REQ", FAKE_PREFIX .. "requester")
-    say("Simulated an incoming SYNC_REQ -- your client should rebroadcast everything it knows.")
+    say("A guildmate's SYNC_REQ would make your client send " .. #sent .. " message(s):")
+    for _, kind in ipairs({"RESULTS", "NICKS", "STREAKS"}) do
+        if kinds[kind] then
+            say("  |cff88ff88" .. kind .. "|r x" .. kinds[kind])
+        else
+            say("  |cffff8888" .. kind .. "|r x0  (nothing known to share)")
+        end
+    end
+    for _, text in ipairs(sent) do
+        say("  |cff888888" .. text .. "|r")
+    end
+    say("Nothing was actually transmitted -- this is a preview of the wire payload, "
+        .. "so it works solo and with Isolate on.")
 end
 
 -- Anything that changes local state out-of-band has to refresh the whole
@@ -361,7 +423,7 @@ local SECTIONS = {
         {text = "Add streak entries",         fn = Actions.addStreaks},
         {text = "Simulate a rename",          fn = Actions.simulateRename},
         {text = "Simulate stale echo",        fn = Actions.simulateStaleEcho},
-        {text = "Simulate SYNC_REQ",          fn = Actions.simulateSyncReq},
+        {text = "Preview SYNC_REQ reply",     fn = Actions.simulateSyncReq},
     }},
     {title = "Your own state", buttons = {
         {text = "Force win today",     fn = Actions.winToday},
