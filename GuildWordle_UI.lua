@@ -400,6 +400,9 @@ for i = 1, ROW_POOL_SIZE do
         if not e then return end
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:AddLine(e.name, 1, 0.82, 0)
+        if e.charName and e.charName ~= e.name then
+            GameTooltip:AddLine("Played as " .. e.charName, 0.7, 0.7, 0.7)
+        end
         if e.pattern then
             GameTooltip:AddLine(e.solved and (e.guesses .. "/6 · Solved") or "X/6 · Not solved", 1, 1, 1)
             AddPatternToTooltip(e.pattern)
@@ -448,7 +451,10 @@ local function RenderResultsTab()
 
     local sorted = {}
     for name, data in pairs(lb) do
-        sorted[#sorted+1] = {name=data.nickname or name, guesses=data.guesses, solved=data.solved, pattern=data.pattern}
+        sorted[#sorted+1] = {
+            name = data.nickname or name, charName = name,
+            guesses = data.guesses, solved = data.solved, pattern = data.pattern,
+        }
     end
     table.sort(sorted, function(a, b)
         if a.solved ~= b.solved then return a.solved end
