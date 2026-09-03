@@ -160,6 +160,15 @@ local function InitDB()
     -- whichever character on a given day keeps the streak going, since it's
     -- tracking "did this account solve today", not any one character's run.
     GuildWordleDB.streak = GuildWordleDB.streak or { current = 0, best = 0, lastDate = nil }
+    -- Account-wide nickname shown on the guild streak leaderboard (streaks
+    -- are account-wide but the character name changes per alt) — defaults to
+    -- the current character's name the first time any character on this
+    -- account opens the addon after this update.
+    GuildWordleDB.settings.nickname = GuildWordleDB.settings.nickname or UnitName("player")
+    -- Per-guild streak leaderboard: streakBoard[guildKey][nickname] =
+    -- {current, best, lastDate}, synced via the same gossip pattern as the
+    -- daily results leaderboard below.
+    GuildWordleDB.streakBoard = GuildWordleDB.streakBoard or {}
 
     local cutoff = tonumber(date("%Y%m%d", time() - 7*86400))
 
@@ -227,6 +236,50 @@ function GW.RecordStreakResult(won)
     s.lastDate = today
 end
 
+-- Returns the account-wide streak table, first zeroing out `current` if the
+-- last recorded day is older than yesterday — i.e. the player skipped at
+-- least one full day without playing at all. RecordStreakResult() already
+-- gets this right at the moment of the *next* completed game (a stale
+-- lastDate fails the "extend" check and falls through to a reset), but
+-- without this, anything that just *reads* the streak (the UI label,
+-- /wordle streak, or a broadcast to the guild streak board) would keep
+-- showing the old count until the player next plays. Call this instead of
+-- reading GuildWordleDB.streak directly anywhere outside RecordStreakResult.
+function GW.CurrentStreak()
+    local s = GuildWordleDB.streak
+    if s.current > 0 then
+        local today     = GetDateString()
+        local yesterday = date("%Y%m%d", time() - 86400)
+        if s.lastDate ~= today and s.lastDate ~= yesterday then
+            s.current = 0
+        end
+    end
+    return s
+end
+
+-- ── Nickname ─────────────────────────────────────────────────────────────────
+-- Account-wide (like the streak itself), since the streak leaderboard needs
+-- one stable label per account regardless of which alt is currently logged
+-- in. Characters/commas/semicolons are stripped since nicknames travel over
+-- the same ","/";"-delimited addon-message format as streak/result entries.
+
+local MAX_NICK_LEN = 16
+
+function GW.SetNickname(raw)
+    local name = strtrim(raw or ""):gsub("[,;]", "")
+    if name == "" then
+        print("|cffFFD700[GuildWordle]|r Current nickname: \"" ..
+            (GuildWordleDB.settings.nickname or "") .. "\"  (use /wordle nick <name> to change it)")
+        return
+    end
+    if #name > MAX_NICK_LEN then name = name:sub(1, MAX_NICK_LEN) end
+
+    GuildWordleDB.settings.nickname = name
+    print("|cffFFD700[GuildWordle]|r Nickname set to \"" .. name .. "\".")
+    if GW.OnNicknameChanged then GW.OnNicknameChanged() end
+    GW.BroadcastStreak()
+end
+
 function GW.ResetGame()
     local today = GetDateString()
     GuildWordleDB.games[CharKey()] = { date=today, guesses={}, results={}, state="playing" }
@@ -285,6 +338,7 @@ function GW.OnGameEnd(won)
 
     if IsInGuild() then
         GW.BroadcastKnownResults()
+        GW.BroadcastStreak()
     end
 
     GW.AutoShareResult()
@@ -396,6 +450,50 @@ function GW.BroadcastKnownResults()
     flush()
 end
 
+-- ── Streak leaderboard (gossip) ───────────────────────────────────────────────
+-- Same gossip shape as GW.BroadcastKnownResults above, but keyed by nickname
+-- instead of character name (since the streak itself is account-wide) and not
+-- date-scoped (a streak isn't "today's" data the way a guess result is).
+
+-- Writes this account's own live streak into the local per-guild streak
+-- board under its current nickname, so it shows up in its own ranking
+-- immediately — not just after a round-trip through guild chat.
+function GW.RecordOwnStreakEntry()
+    local guildKey = GW.CurrentGuildKey()
+    local s        = GW.CurrentStreak()
+    GuildWordleDB.streakBoard[guildKey] = GuildWordleDB.streakBoard[guildKey] or {}
+    GuildWordleDB.streakBoard[guildKey][GuildWordleDB.settings.nickname] = {
+        current = s.current, best = s.best, lastDate = s.lastDate or "0",
+    }
+end
+
+function GW.BroadcastStreak()
+    if not IsInGuild() then return end
+    GW.RecordOwnStreakEntry()
+    local board = GuildWordleDB.streakBoard[GW.CurrentGuildKey()]
+    if not board or not next(board) then return end
+
+    local header = "STREAKS:"
+    local batch, batchLen = {}, #header
+
+    local function flush()
+        if #batch > 0 then
+            SendAddonMsg(header .. table.concat(batch, ";"))
+            batch, batchLen = {}, #header
+        end
+    end
+
+    for nick, d in pairs(board) do
+        local entry = string.format("%s,%d,%d,%s", nick, d.current, d.best, d.lastDate or "0")
+        if batchLen + #entry + 1 > MAX_MSG_LEN and #batch > 0 then
+            flush()
+        end
+        batch[#batch+1] = entry
+        batchLen = batchLen + #entry + 1
+    end
+    flush()
+end
+
 local function HandleAddonMessage(prefix, text, channel, sender)
     if prefix ~= ADDON_PREFIX then return end
     local today = GetDateString()
@@ -404,6 +502,7 @@ local function HandleAddonMessage(prefix, text, channel, sender)
 
     if text == "SYNC_REQ" and name ~= me then
         GW.BroadcastKnownResults()
+        GW.BroadcastStreak()
 
     elseif text:sub(1,8) == "RESULTS:" then
         local _, _, rDate, rest = text:find("^RESULTS:([^:]+):(.+)$")
@@ -427,6 +526,39 @@ local function HandleAddonMessage(prefix, text, channel, sender)
                 end
             end
             if changed and GW.OnLeaderboardUpdate then GW.OnLeaderboardUpdate() end
+        end
+
+    elseif text:sub(1,8) == "STREAKS:" then
+        local rest = text:sub(9)
+        if rest and rest ~= "" then
+            local changed  = false
+            local guildKey = GW.CurrentGuildKey()
+            GuildWordleDB.streakBoard[guildKey] = GuildWordleDB.streakBoard[guildKey] or {}
+            local board = GuildWordleDB.streakBoard[guildKey]
+            for entry in rest:gmatch("[^;]+") do
+                local rNick, rCur, rBest, rDate = entry:match("^([^,]+),(%d+),(%d+),(%d+)$")
+                if rNick then
+                    local existing = board[rNick]
+                    -- "best" only ever moves up, regardless of message freshness.
+                    local newBest = tonumber(rBest)
+                    if existing and existing.best and existing.best > newBest then
+                        newBest = existing.best
+                    end
+                    -- Only accept the incoming "current" if it's at least as
+                    -- fresh (same-or-later lastDate) as what we already have —
+                    -- otherwise a delayed/stale gossip echo could make an
+                    -- already-broken streak appear active again. Dates are
+                    -- YYYYMMDD strings, so lexical >= is numerically correct.
+                    if not existing or rDate >= (existing.lastDate or "0") then
+                        board[rNick] = { current = tonumber(rCur), best = newBest, lastDate = rDate }
+                        changed = true
+                    elseif newBest > (existing.best or 0) then
+                        existing.best = newBest
+                        changed = true
+                    end
+                end
+            end
+            if changed and GW.OnStreakBoardUpdate then GW.OnStreakBoardUpdate() end
         end
     end
 end
@@ -488,7 +620,10 @@ ev:SetScript("OnEvent", function(self, event, ...)
             -- results keep propagating across a session instead of only at login.
             if C_Timer and C_Timer.NewTicker then
                 C_Timer.NewTicker(300, function()
-                    if IsInGuild() then GW.BroadcastKnownResults() end
+                    if IsInGuild() then
+                        GW.BroadcastKnownResults()
+                        GW.BroadcastStreak()
+                    end
                 end)
             end
         end
@@ -498,6 +633,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
             if not IsInGuild() then return end
             SendAddonMsg("SYNC_REQ")
             GW.BroadcastKnownResults()
+            GW.BroadcastStreak()
         end)
 
     elseif event == "CHAT_MSG_ADDON" then
@@ -507,18 +643,26 @@ end)
 
 SLASH_GUILDWORDLE1 = "/wordle"
 SlashCmdList["GUILDWORDLE"] = function(msg)
-    msg = strtrim(msg):lower()
-    if msg == "lb" or msg == "leaderboard" then
+    -- Nicknames need their original casing preserved, so keep a raw copy
+    -- alongside the lowercased one used for command matching.
+    local raw   = strtrim(msg)
+    local lower = raw:lower()
+
+    if lower == "lb" or lower == "leaderboard" then
         GW.PrintLeaderboard()
-    elseif msg == "streak" then
-        local s = GuildWordleDB.streak
+    elseif lower == "streak" then
+        local s = GW.CurrentStreak()
         if s.current > 0 then
             print(string.format("|cffFFD700[GuildWordle]|r Current streak: %d day%s (best: %d)",
                 s.current, s.current == 1 and "" or "s", s.best))
         else
             print(string.format("|cffFFD700[GuildWordle]|r No active streak (best: %d)", s.best))
         end
-    elseif msg == "reset" then
+    elseif lower == "nick" then
+        GW.SetNickname("")
+    elseif lower:sub(1,5) == "nick " then
+        GW.SetNickname(raw:sub(6))
+    elseif lower == "reset" then
         GW.ResetGame()
     else
         if GuildWordleFrame then
