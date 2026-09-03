@@ -13,7 +13,9 @@ jobs:
   # tagged and published -- not against the PR branch's pre-merge state, so a
   # bad interaction introduced by the merge itself still blocks the release.
   test:
-    name: Lua tests
+    # Distinct from the "Lua tests" job in tests.yml so branch-protection
+    # required-check matching (which is by job name) is unambiguous.
+    name: Lua tests (pre-release)
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
