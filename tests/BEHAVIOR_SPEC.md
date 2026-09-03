@@ -633,6 +633,78 @@ observation. Organize as a checklist to run through after any UI-file change, or
 
 ---
 
+---
+
+## 4. Dev panel (`GuildWordle_Dev.lua`)
+
+An in-game panel that simulates the things a single client can't otherwise exercise: what the UI
+does when *other* clients talk to it. Bound to the same `/wordle dev` switch as error visibility —
+dev mode on means the panel is up — and persisted, so it survives a `/reload` (which matters,
+since reload-time bugs are exactly the ones worth having it open for).
+
+Fake guildmates are injected by handing genuine addon-message strings to the real
+`HandleAddonMessage`, **not** by writing to the DB directly, so what appears on screen is what a
+real guildmate's broadcast would actually produce, parsing included. All fake characters/accounts
+carry a `Zzt` prefix so cleanup can find them unambiguously.
+
+**Safety:** injected data lands in real SavedVariables, which the 5-minute gossip ticker would then
+broadcast to the real guild — fake players would appear on real guildmates' boards. The panel's
+**Isolate** toggle (ON automatically whenever the panel opens) replaces the three outgoing
+broadcast functions with no-ops. Turning it off, or closing the panel, restores normal
+broadcasting. Closing the panel also turns dev mode off, so "dev mode ⟺ panel visible" stays true.
+
+- **DEV-01/02**: An injected result becomes a real leaderboard entry with the right
+  guesses/solved/pattern, and its nickname resolves through `charNicknames` — i.e. the injection
+  exercises the display path, not just storage.
+- **DEV-03**: The 8-result set contains both solved and unsolved entries, so sort order
+  (solved first, then fewest guesses, then alphabetical) is actually observable.
+- **DEV-04**: The scroll set yields 30 distinct rows — enough to exercise scrolling and the
+  `ROW_POOL_SIZE` cap.
+- **DEV-05**: Long / exactly-15 / accented / Cyrillic nicknames survive the wire round-trip intact,
+  and truncation of them never ends on a dangling UTF-8 lead byte.
+- **DEV-06**: Streak injection produces both active and broken-with-a-best entries, so "Streak" and
+  "Best" tabs show visibly different sets.
+- **DEV-07**: The simulated rename updates in place — the row count is unchanged and the old
+  nickname is gone, not duplicated. (This is the bug that shipped once.)
+- **DEV-08**: The stale-echo action cannot revive a broken streak, but `best` still rises —
+  demonstrating the freshness gate and best-only-increases rules together.
+- **DEV-09**: Forced win/loss produce a coherent finished game (`guesses`/`results` same length, or
+  `CurrentGame()`'s corruption repair would wipe it) and a matching own-result row.
+- **DEV-10**: The streak helpers set 5/10, and the "break" helper produces a stale `lastDate` that
+  reads as broken immediately.
+- **DEV-11**: "Clear fake data" removes every `Zzt`-prefixed entry from all three tables and leaves
+  real data untouched.
+- **DEV-12/13**: Panel visibility follows `devMode`; `/wordle dev` toggles both together; re-showing
+  after hiding reuses the frame rather than rebuilding it.
+
+## 5. UI render robustness (`GuildWordle_UI.lua`, partial automation)
+
+`GuildWordle_UI.lua` *can* be loaded against the mock, but the mock's geometry is meaningless
+(widths/heights stub to 0) — so **nothing here tests layout**; that stays manual UAT (section 3).
+What is automated is the render paths' robustness against awkward data, which is where every
+UI-surfacing crash actually lived: the panel hit a nil table or missing field and took unrelated
+code down with it.
+
+Note these tests assert **both** that rendering doesn't throw *and* that the panel didn't print an
+internal error. A bare no-throw check is insufficient, because `SafeUpdateLBPanel` swallows throws
+by design — a broken render would otherwise register as a pass.
+
+- **UI-01/02**: Renders cleanly with an empty leaderboard, and with a populated one.
+- **UI-03/04 (regression)**: Renders cleanly with `charNicknames` / `streakBoard` set to `nil` —
+  the exact shape of the reported in-game crash.
+- **UI-05**: Renders more entries than the row pool holds.
+- **UI-06**: Renders long, accented, and Cyrillic nicknames.
+- **UI-07**: Renders a finished game's own result, after both a win and a loss.
+- **UI-08**: Renders a leaderboard entry whose `pattern` field is missing — one bad row (e.g. from
+  a truncated gossip message) must not blank the whole panel.
+- **UI-09**: Renders outside a guild.
+- **UI-10**: A forced error inside the render path is contained and reported by
+  `SafeUpdateLBPanel`, not propagated to the caller.
+- **UI-11**: A rename mid-session re-renders without error and refreshes the nickname lookup
+  synchronously.
+
+---
+
 ## Open questions for review
 
 1. **Test-only export surface.** Several high-value unit/integration tests above (`HandleAddonMessage`
