@@ -1006,3 +1006,30 @@ SlashCmdList["GUILDWORDLE"] = function(msg)
         print("|cffff4444[GuildWordle]|r Command error: " .. tostring(err))
     end
 end
+
+-- ── Test hooks ───────────────────────────────────────────────────────────────
+-- Exposes otherwise-`local` internals for tests/ only — nothing in the addon
+-- itself ever reads GW._test. See tests/BEHAVIOR_SPEC.md for what each of
+-- these is exercised by; HandleAddonMessage and InitDB in particular can't be
+-- meaningfully tested without this, since they're the addon's highest-risk
+-- code (wire-protocol parsing, SavedVariables bring-up) and aren't reachable
+-- any other way from outside this file.
+GW._test = {
+    InitDB             = InitDB,
+    HandleAddonMessage = HandleAddonMessage,
+    HandleSlashCommand = HandleSlashCommand,
+    EvaluateGuess      = EvaluateGuess,
+    PackResults        = PackResults,
+    GetTodaysWord      = GetTodaysWord,
+    GetDateString      = GetDateString,
+    CharKey            = CharKey,
+    FilterLetters      = FilterLetters,
+    -- Lets a test pin today's word to a specific value without fighting
+    -- GW.CurrentWord()'s own date-based cache invalidation (cachedWordDate
+    -- is a file-local upvalue tests can't otherwise reach) — needed for any
+    -- guess-evaluation test that requires a specific known answer.
+    SetWordForTest = function(word, forDate)
+        GW.todaysWord = word
+        cachedWordDate = forDate or GetDateString()
+    end,
+}
