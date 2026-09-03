@@ -6,8 +6,8 @@ local CELL     = TILE_SZ + 2 + TILE_GAP  -- 60px stride
 
 local GRID_W   = 5 * (TILE_SZ + 2) + 4 * TILE_GAP  -- 294px
 local GAME_W   = GRID_W + 26                         -- 320px  (game section)
-local LB_W     = 170                                 -- leaderboard section width
-local FRAME_W  = GAME_W + LB_W                       -- 490px total
+local LB_W     = 230                                 -- leaderboard section width (room for 15-char names)
+local FRAME_W  = GAME_W + LB_W                       -- 550px total
 local FRAME_H  = 626
 
 local GRID_X   = 13   -- (GAME_W - GRID_W) / 2
@@ -435,9 +435,9 @@ end
 -- sub() since nicknames can contain accented/non-ASCII letters, where a
 -- byte-based cut could split a multi-byte character in half.
 local function TruncName(name)
-    local kept9 = GW.TruncateUTF8(name, 9)
-    if kept9 == name then return name end
-    return GW.TruncateUTF8(name, 8) .. "."
+    local kept15 = GW.TruncateUTF8(name, 15)
+    if kept15 == name then return name end
+    return GW.TruncateUTF8(name, 14) .. "."
 end
 
 local function RenderResultsTab()
@@ -482,7 +482,7 @@ local function RenderResultsTab()
         function(i, e)
             local score = e.solved and (e.guesses .. "/6") or "X/6"
             local color = e.solved and "|cff538d4e" or "|cffcc4444"
-            return string.format("|cff888888%d.|r %-9s %s%s|r", i, TruncName(e.name), color, score)
+            return string.format("|cff888888%d.|r %-15s %s%s|r", i, TruncName(e.name), color, score)
         end,
         function(e) return e end)
 end
@@ -522,7 +522,7 @@ local function RenderStreakTab(mode)
 
     RenderRows(sorted,
         function(i, e)
-            return string.format("|cff888888%d.|r %-9s |cffE8B84B%d-day|r", i, TruncName(e.name), e.value)
+            return string.format("|cff888888%d.|r %-15s |cffE8B84B%d-day|r", i, TruncName(e.name), e.value)
         end,
         function(e) return {name = e.name, streakValue = e.value} end)
 end
@@ -573,7 +573,7 @@ nickLabel:SetTextColor(0.8, 0.8, 0.8)
 local nickBox = CreateFrame("EditBox", "GuildWordleNickInput", frame, "InputBoxTemplate")
 nickBox:SetPoint("LEFT", nickLabel, "RIGHT", 6, -1)
 nickBox:SetSize(LB_W - 12 - (nickLabel:GetStringWidth() + 6) - 6, 20)
-nickBox:SetMaxLetters(16)
+nickBox:SetMaxLetters(15)
 nickBox:SetAutoFocus(false)
 nickBox:SetScript("OnEnterPressed", function(self)
     GW.SetNickname(self:GetText())
