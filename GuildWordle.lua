@@ -984,8 +984,15 @@ local function HandleSlashCommand(msg)
         GW.ResetLeaderboard()
     elseif lower == "dev" then
         GuildWordleDB.settings.devMode = not GuildWordleDB.settings.devMode
+        -- Dev mode is one switch for two things: error visibility (below) and
+        -- the testing panel (GuildWordle_Dev.lua). Guarded because the dev
+        -- file is optional — the addon still works if it's stripped from a
+        -- packaged build.
+        if GW.SetDevPanelShown then
+            GW.SetDevPanelShown(GuildWordleDB.settings.devMode)
+        end
         if GuildWordleDB.settings.devMode then
-            print("|cffFFD700[GuildWordle]|r Dev mode |cff00ff00ON|r — all Lua errors (any addon) will print to chat.")
+            print("|cffFFD700[GuildWordle]|r Dev mode |cff00ff00ON|r — all Lua errors (any addon) print to chat, and the dev panel is open.")
         else
             print("|cffFFD700[GuildWordle]|r Dev mode |cffff4444OFF|r.")
         end
