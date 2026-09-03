@@ -10,3 +10,10 @@
 words.lua
 GuildWordle.lua
 GuildWordle_UI.lua
+# The dev panel is developer-only. BigWigsMods/packager strips everything
+# between these markers when building a release, and .pkgmeta drops the file
+# itself, so published builds neither ship it nor reference it. Working from
+# this folder directly (which is how the addon is developed) keeps it.
+#@debug@
+GuildWordle_Dev.lua
+#@end-debug@
