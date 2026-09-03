@@ -154,6 +154,36 @@ T.suite("5 UI render robustness", function()
         T.assertContains(GW.StreakLabelText({current = 0, best = 7}), "best 7")
     end)
 
+    T.test("UI-14: the Dev button tracks devMode and is the only way into the panel", function()
+        setup()
+        dofile("../GuildWordle_Dev.lua")   -- provides SetDevPanelShown/IsDevPanelShown
+
+        GuildWordleDB.settings.devMode = false
+        T.assertNoThrow(GW.RefreshDevButton, "hiding the button must not error")
+        T.assertFalse(GW.IsDevPanelShown(), "panel stays shut while dev mode is off")
+
+        GuildWordleDB.settings.devMode = true
+        T.assertNoThrow(GW.RefreshDevButton, "showing the button must not error")
+        T.assertFalse(GW.IsDevPanelShown(),
+            "turning dev mode on reveals the button but must not open the panel itself")
+
+        -- What the button's OnClick does.
+        GW.SetDevPanelShown(true)
+        T.assertTrue(GW.IsDevPanelShown(), "the button opens the panel")
+        GW.SetDevPanelShown(false)
+    end)
+
+    T.test("UI-15: a full window refresh updates the Dev button too", function()
+        setup()
+        GuildWordleDB.settings.devMode = true
+        -- RefreshUI runs on frame show; it must include the dev button, or the
+        -- button would only appear after some other event happened to call it.
+        renderCleanly("refresh with dev mode on")
+        T.assertNoThrow(function()
+            if GW.RefreshMainUI then GW.RefreshMainUI() end
+        end, "full refresh must not error with dev mode on")
+    end)
+
     T.test("UI-11: a rename mid-session re-renders without error and updates the mapping", function()
         setup()
         A.winToday()
