@@ -317,37 +317,39 @@ end
 
 -- Updates the account-wide streak the first time *any* character finishes
 -- today's game; later completions by other characters the same day are
--- no-ops (the day is already accounted for). A win extends the streak only
--- if the previous recorded day was literally yesterday — a skipped day, not
--- just a loss, also breaks it. Losing resets the streak to 0 immediately.
-function GW.RecordStreakResult(won)
+-- no-ops (the day is already accounted for).
+--
+-- The streak measures PARTICIPATION, not success: finishing today's puzzle
+-- extends it whether you solved the word or not. The only thing that breaks
+-- a streak is skipping a day entirely — which is why this takes no win/loss
+-- argument. (It deliberately did reset on a loss at one point; that made the
+-- streak a skill metric rather than a "did you show up" one.)
+function GW.RecordStreakResult()
     local s     = GuildWordleDB.streak
     local today = GetDateString()
     if s.lastDate == today then return end
 
-    if won then
-        local yesterday = date("%Y%m%d", time() - 86400)
-        if s.current > 0 and s.lastDate == yesterday then
-            s.current = s.current + 1
-        else
-            s.current = 1
-        end
-        if s.current > s.best then s.best = s.current end
+    local yesterday = date("%Y%m%d", time() - 86400)
+    if s.current > 0 and s.lastDate == yesterday then
+        s.current = s.current + 1
     else
-        s.current = 0
+        s.current = 1
     end
+    if s.current > s.best then s.best = s.current end
     s.lastDate = today
 end
 
 -- Returns the account-wide streak table, first zeroing out `current` if the
 -- last recorded day is older than yesterday — i.e. the player skipped at
--- least one full day without playing at all. RecordStreakResult() already
--- gets this right at the moment of the *next* completed game (a stale
--- lastDate fails the "extend" check and falls through to a reset), but
--- without this, anything that just *reads* the streak (the UI label,
--- /wordle streak, or a broadcast to the guild streak board) would keep
--- showing the old count until the player next plays. Call this instead of
--- reading GuildWordleDB.streak directly anywhere outside RecordStreakResult.
+-- least one full day without playing at all, which is the ONLY thing that
+-- breaks a streak now that losing doesn't (see GW.RecordStreakResult).
+-- That function already gets this right at the moment of the *next*
+-- completed game (a stale lastDate fails the "extend" check and falls
+-- through to a reset), but without this, anything that just *reads* the
+-- streak (the UI label, /wordle streak, or a broadcast to the guild streak
+-- board) would keep showing the old count until the player next plays. Call
+-- this instead of reading GuildWordleDB.streak directly anywhere outside
+-- RecordStreakResult.
 function GW.CurrentStreak()
     local s = GuildWordleDB.streak
     if s.current > 0 then
@@ -495,7 +497,8 @@ function GW.OnGameEnd(won)
         guesses = numGuess, solved = won, pattern = packed,
     }
 
-    GW.RecordStreakResult(won)
+    -- Takes no argument: playing is what counts, not winning (see above).
+    GW.RecordStreakResult()
 
     if IsInGuild() then
         GW.BroadcastKnownResults()
