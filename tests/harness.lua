@@ -22,8 +22,15 @@ dofile("../words.lua")
 
 dofile("../GuildWordle.lua")
 
+-- GuildWordle_UI.lua is deliberately NOT loaded: it's wall-to-wall live
+-- widget calls with no headless path (see BEHAVIOR_SPEC.md section 3, which
+-- covers it as manual UAT instead). GuildWordle_Dev.lua IS loaded, since its
+-- fake-data injection is plain logic worth verifying.
+dofile("../GuildWordle_Dev.lua")
+
 local GW = _G.GuildWordle
 assert(GW and GW._test, "GuildWordle.lua did not load correctly, or GW._test hooks are missing")
+assert(GW.DevActions, "GuildWordle_Dev.lua did not load correctly")
 
 -- The addon's event-dispatch frame, captured now because it's created once
 -- at load time and Mock.reset() clears the createdFrames list -- tests that
