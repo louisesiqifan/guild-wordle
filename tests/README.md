@@ -31,7 +31,7 @@ appears to. `run_all.sh` requires `luajit` and refuses to fall back.
 
 ## Coverage
 
-153 automated tests. Spec sections 1, 2, 4 and 5 are automated. **Section 3
+145 automated tests. Spec sections 1, 2, 4 and 5 are automated. **Section 3
 (UAT) stays a manual in-game checklist** — the mock's geometry is meaningless
 (widths stub to 0), so layout/visual behavior can't be asserted headlessly.
 
