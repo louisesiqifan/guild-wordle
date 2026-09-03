@@ -4,3 +4,8 @@ ignore:
   - .gitignore
   - README.md
   - LICENSE
+  # Test suite is developer-only; it would otherwise ship to every CurseForge
+  # user, and its files aren't listed in the .toc so the client would never
+  # load them anyway.
+  - tests
+  - CLAUDE.md
