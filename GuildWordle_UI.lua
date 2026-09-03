@@ -473,14 +473,18 @@ local function RenderStreakTab(mode)
     local guildName = GetGuildInfo("player")
     lbTitle:SetText(guildName and ("|cffFFD700" .. guildName .. " Streaks|r") or "|cffFFD700No Guild|r")
 
+    -- Keyed by accountId, not nickname (see GW.RecordOwnStreakEntry) — the
+    -- table key here is just an opaque identity, the display name always
+    -- comes from the .nickname field on each entry.
     local board = GuildWordleDB.streakBoard and GuildWordleDB.streakBoard[GW.CurrentGuildKey()]
     local sorted = {}
     if board then
-        for nick, d in pairs(board) do
+        for _, d in pairs(board) do
+            local label = d.nickname or "?"
             if mode == "current" and d.current and d.current > 0 then
-                sorted[#sorted+1] = {name = nick, value = d.current}
+                sorted[#sorted+1] = {name = label, value = d.current}
             elseif mode == "longest" and d.best and d.best > 0 then
-                sorted[#sorted+1] = {name = nick, value = d.best}
+                sorted[#sorted+1] = {name = label, value = d.best}
             end
         end
     end
