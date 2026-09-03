@@ -165,6 +165,17 @@ local function InitDB()
     -- the current character's name the first time any character on this
     -- account opens the addon after this update.
     GuildWordleDB.settings.nickname = GuildWordleDB.settings.nickname or UnitName("player")
+    -- One-time cleanup: a nickname could have been saved by an earlier build
+    -- of this addon, before GW.SetNickname enforced letters-only, and would
+    -- otherwise keep being broadcast with digits/punctuation intact forever.
+    -- Re-applying the same filter here guarantees every *stored* nickname
+    -- satisfies the invariant, not just ones set going forward. Idempotent —
+    -- a no-op once the value is already clean.
+    do
+        local cleaned = GuildWordleDB.settings.nickname:gsub("[^%a]", "")
+        if cleaned == "" then cleaned = UnitName("player") end
+        GuildWordleDB.settings.nickname = cleaned
+    end
     -- Stable, hidden per-account identity key for the streak leaderboard —
     -- frozen the first time any character on this account ever loads the
     -- addon, and never re-evaluated after that (this `or` only actually
