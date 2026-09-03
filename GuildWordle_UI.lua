@@ -440,7 +440,8 @@ local function RenderResultsTab()
     local guildName = GetGuildInfo("player")
     lbTitle:SetText(guildName and ("|cffFFD700" .. guildName .. " Today|r") or "|cffFFD700No Guild|r")
 
-    local byGuild = GuildWordleDB.leaderboard and GuildWordleDB.leaderboard[GW.CurrentGuildKey()]
+    local guildKey = GW.CurrentGuildKey()
+    local byGuild = GuildWordleDB.leaderboard and GuildWordleDB.leaderboard[guildKey]
     local lb = byGuild and byGuild[today]
 
     if not lb or not next(lb) then
@@ -449,10 +450,11 @@ local function RenderResultsTab()
         return
     end
 
+    local names = GuildWordleDB.charNicknames and GuildWordleDB.charNicknames[guildKey]
     local sorted = {}
     for name, data in pairs(lb) do
         sorted[#sorted+1] = {
-            name = data.nickname or name, charName = name,
+            name = (names and names[name]) or name, charName = name,
             guesses = data.guesses, solved = data.solved, pattern = data.pattern,
         }
     end
