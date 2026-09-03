@@ -436,6 +436,14 @@ local function TruncName(name)
 end
 
 local function RenderResultsTab()
+    -- Self-refresh this character's own name->nickname mapping before
+    -- reading it, mirroring RenderStreakTab's GW.RecordOwnStreakEntry() call
+    -- below — otherwise a rename shows stale (old nickname, or no nickname
+    -- yet at all right after login) until some *other* event happens to
+    -- trigger a re-render, since GW.SetNickname refreshes the UI before its
+    -- own GW.BroadcastCharNicknames() call updates this lookup.
+    if GW.RecordOwnCharNickname then GW.RecordOwnCharNickname() end
+
     local today = date("%Y%m%d")
     local guildName = GetGuildInfo("player")
     lbTitle:SetText(guildName and ("|cffFFD700" .. guildName .. " Today|r") or "|cffFFD700No Guild|r")
