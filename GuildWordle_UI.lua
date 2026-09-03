@@ -542,7 +542,7 @@ local NICK_Y = ANNOUNCE_Y0 - 20
 
 local nickLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 nickLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, NICK_Y)
-nickLabel:SetText("Nick:")
+nickLabel:SetText("Nickname:")
 nickLabel:SetTextColor(0.8, 0.8, 0.8)
 
 local nickBox = CreateFrame("EditBox", "GuildWordleNickInput", frame, "InputBoxTemplate")
@@ -570,7 +570,15 @@ local function RefreshNickBox()
     if nickBox:HasFocus() then return end
     nickBox:SetText(GuildWordleDB.settings.nickname or "")
 end
-GW.OnNicknameChanged = RefreshNickBox
+
+-- A rename can happen while a streak tab is the active one showing the old
+-- name — refresh the leaderboard panel too, not just the text box, so the
+-- change is visible immediately instead of only after switching tabs away
+-- and back.
+GW.OnNicknameChanged = function()
+    RefreshNickBox()
+    UpdateLBPanel()
+end
 
 local SHARE_CHANNELS = {"GUILD", "PARTY", "RAID"}
 local SHARE_LABELS = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
