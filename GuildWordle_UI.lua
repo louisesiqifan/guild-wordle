@@ -720,7 +720,7 @@ local function ShowGameResult(won)
         local msg = WIN_MSGS[#game.guesses] or "Got it!"
         statusText:SetText("|cff538d4e" .. msg .. "|r")
     else
-        statusText:SetText("|cffcc4444The word was: |r|cffFFFFFF" .. GW.todaysWord .. "|r")
+        statusText:SetText("|cffcc4444The word was: |r|cffFFFFFF" .. GW.CurrentWord() .. "|r")
     end
 end
 
