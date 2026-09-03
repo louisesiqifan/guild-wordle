@@ -808,3 +808,13 @@ inputBox:SetScript("OnTextChanged",   function(self) UpdatePreview(self:GetText(
 inputBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 
 frame:SetScript("OnShow", RefreshUI)
+
+-- Full-window refresh, exposed because several pieces of this file
+-- (RefreshStreakLabel, RefreshShareNowButton, RefreshGrid, ...) are local and
+-- otherwise only run on frame-show or after a guess. Anything that changes
+-- local state out-of-band -- the dev panel's forced win/loss and streak
+-- helpers -- needs a way to make the whole window catch up, not just the
+-- leaderboard panel that GW.OnLeaderboardUpdate covers.
+function GW.RefreshMainUI()
+    if frame:IsShown() then RefreshUI() end
+end
