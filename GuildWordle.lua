@@ -151,6 +151,22 @@ function GW.TruncateUTF8(str, maxChars)
     return str
 end
 
+-- Strips everything except letters: ASCII a-z/A-Z are kept via %a, and any
+-- byte ≥128 is kept too, since a valid multi-byte UTF-8 sequence for an
+-- accented/non-ASCII letter is built entirely from such bytes. Deliberately
+-- avoids Lua pattern character-class byte-range escapes (e.g. the tempting
+-- "[\0-\64\91-\96\123-\127]") — that parses and runs fine in some Lua
+-- versions (verified in 5.5) but throws "malformed pattern (missing ']')" in
+-- WoW's actual embedded Lua 5.1, discovered the hard way when it broke
+-- GW.SetNickname outright. A per-byte gsub callback with a plain %a check
+-- sidesteps that version difference entirely.
+local function FilterLetters(s)
+    return (s:gsub(".", function(c)
+        if c:byte() >= 128 or c:match("%a") then return c end
+        return ""
+    end))
+end
+
 local function SafeDelay(secs, fn)
     if C_Timer and C_Timer.After then
         C_Timer.After(secs, fn)
@@ -238,7 +254,7 @@ local function InitDB()
     -- satisfies the invariant, not just ones set going forward. Idempotent —
     -- a no-op once the value is already clean.
     do
-        local cleaned = GuildWordleDB.settings.nickname:gsub("[\0-\64\91-\96\123-\127]", "")
+        local cleaned = FilterLetters(GuildWordleDB.settings.nickname)
         if cleaned == "" then cleaned = UnitName("player") or "Player" end
         GuildWordleDB.settings.nickname = cleaned
     end
@@ -372,7 +388,7 @@ local function SetNicknameImpl(raw)
         return
     end
 
-    local name = trimmed:gsub("[\0-\64\91-\96\123-\127]", "")
+    local name = FilterLetters(trimmed)
     if name == "" then
         print("|cffFFD700[GuildWordle]|r Nicknames can only contain letters.")
         return
