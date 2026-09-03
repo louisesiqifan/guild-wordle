@@ -329,7 +329,7 @@ end
 -- bytes ≥128, so it can never contain a literal comma (44) or semicolon (59),
 -- both of which are ASCII and still get stripped.
 
-local MAX_NICK_LEN = 16
+local MAX_NICK_LEN = 15
 
 function GW.SetNickname(raw)
     local trimmed = strtrim(raw or "")
