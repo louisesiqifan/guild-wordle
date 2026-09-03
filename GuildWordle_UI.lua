@@ -448,7 +448,7 @@ local function RenderResultsTab()
 
     local sorted = {}
     for name, data in pairs(lb) do
-        sorted[#sorted+1] = {name=name, guesses=data.guesses, solved=data.solved, pattern=data.pattern}
+        sorted[#sorted+1] = {name=data.nickname or name, guesses=data.guesses, solved=data.solved, pattern=data.pattern}
     end
     table.sort(sorted, function(a, b)
         if a.solved ~= b.solved then return a.solved end
