@@ -110,6 +110,29 @@ local function StripRealm(fullName)
     return (fullName:match("^([^%-]+)")) or fullName
 end
 
+-- Truncates to at most `maxChars` *characters*, not bytes, without ever
+-- splitting a multi-byte UTF-8 sequence in half — needed because nicknames
+-- can contain accented/non-ASCII letters (see GW.SetNickname), where one
+-- character can be 2-4 bytes; a plain byte-based sub() could otherwise cut
+-- a character in half and leave a corrupted/garbled trailing byte.
+function GW.TruncateUTF8(str, maxChars)
+    local chars, i, len = 0, 1, #str
+    while i <= len do
+        local b = str:byte(i)
+        local charLen
+        if     b < 0x80  then charLen = 1
+        elseif b >= 0xF0 then charLen = 4
+        elseif b >= 0xE0 then charLen = 3
+        elseif b >= 0xC0 then charLen = 2
+        else                  charLen = 1  -- stray continuation byte; don't hang
+        end
+        chars = chars + 1
+        if chars > maxChars then return str:sub(1, i - 1) end
+        i = i + charLen
+    end
+    return str
+end
+
 local function SafeDelay(secs, fn)
     if C_Timer and C_Timer.After then
         C_Timer.After(secs, fn)
@@ -172,7 +195,7 @@ local function InitDB()
     -- satisfies the invariant, not just ones set going forward. Idempotent —
     -- a no-op once the value is already clean.
     do
-        local cleaned = GuildWordleDB.settings.nickname:gsub("[^%a]", "")
+        local cleaned = GuildWordleDB.settings.nickname:gsub("[\0-\64\91-\96\123-\127]", "")
         if cleaned == "" then cleaned = UnitName("player") end
         GuildWordleDB.settings.nickname = cleaned
     end
@@ -295,11 +318,16 @@ end
 -- are actually keyed by GuildWordleDB.accountId (see InitDB), so renaming is
 -- just an in-place field update, the same as current/best/lastDate already
 -- are; no delete-and-recreate dance, no separate rename message needed.
--- Letters only (A-Z/a-z) — everything else (digits, spaces, punctuation,
--- commas/semicolons) is stripped, since nicknames travel over the same
--- delimited addon-message formats as everything else and a stray digit or
--- delimiter character could otherwise be misread as part of a different
--- field by a client parsing an older/simpler wire format.
+-- Letters only — digits, spaces, and punctuation (including commas/
+-- semicolons) are stripped, since nicknames travel over the same delimited
+-- addon-message formats as everything else and a stray digit or delimiter
+-- character could otherwise be misread as part of a different field by a
+-- client parsing an older/simpler wire format. Accented/non-ASCII letters
+-- (é, ñ, ö, Cyrillic, CJK, ...) ARE allowed: the filter only strips bytes in
+-- the ASCII range that aren't a-z/A-Z, leaving any byte ≥128 alone. This is
+-- still wire-safe — a valid multi-byte UTF-8 sequence is built entirely from
+-- bytes ≥128, so it can never contain a literal comma (44) or semicolon (59),
+-- both of which are ASCII and still get stripped.
 
 local MAX_NICK_LEN = 16
 
@@ -311,12 +339,12 @@ function GW.SetNickname(raw)
         return
     end
 
-    local name = trimmed:gsub("[^%a]", "")
+    local name = trimmed:gsub("[\0-\64\91-\96\123-\127]", "")
     if name == "" then
-        print("|cffFFD700[GuildWordle]|r Nicknames can only contain letters (A-Z).")
+        print("|cffFFD700[GuildWordle]|r Nicknames can only contain letters.")
         return
     end
-    if #name > MAX_NICK_LEN then name = name:sub(1, MAX_NICK_LEN) end
+    name = GW.TruncateUTF8(name, MAX_NICK_LEN)
 
     if GuildWordleDB.settings.nickname == name then
         print("|cffFFD700[GuildWordle]|r Nickname is already \"" .. name .. "\".")
@@ -547,7 +575,32 @@ end
 function GW.RecordOwnCharNickname()
     local guildKey = GW.CurrentGuildKey()
     GuildWordleDB.charNicknames[guildKey] = GuildWordleDB.charNicknames[guildKey] or {}
-    GuildWordleDB.charNicknames[guildKey][UnitName("player")] = GuildWordleDB.settings.nickname
+    local names = GuildWordleDB.charNicknames[guildKey]
+    names[UnitName("player")] = GuildWordleDB.settings.nickname
+
+    -- Also refresh any *other* of this account's characters already known to
+    -- be in *this* guild, so a rename while playing this character doesn't
+    -- leave an alt's cached mapping stale in other guildmates' clients until
+    -- that alt itself logs back in and rebroadcasts. Safe to do: cross-
+    -- referencing GuildWordleDB.games (account-wide — every character on
+    -- this account that's played recently) against this guild's own results
+    -- leaderboard (guild-scoped) can only ever confirm characters that are
+    -- BOTH mine AND already independently known to belong to this guild —
+    -- never widen this to characters not already confirmed here, since
+    -- leaderboard/gossip data must stay scoped to the guild it came from.
+    local byGuild = GuildWordleDB.leaderboard[guildKey]
+    if byGuild then
+        local knownInGuild = {}
+        for _, byDate in pairs(byGuild) do
+            for charName in pairs(byDate) do knownInGuild[charName] = true end
+        end
+        for charKey in pairs(GuildWordleDB.games) do
+            local charName = charKey:match("^([^%-]+)")
+            if charName and knownInGuild[charName] then
+                names[charName] = GuildWordleDB.settings.nickname
+            end
+        end
+    end
 end
 
 function GW.BroadcastCharNicknames()
