@@ -59,6 +59,11 @@ T.suite("6 Release build (dev file absent)", function()
             T.assertContains(body, f, "release .toc should still load " .. f)
         end
         T.assertFalse(body:find("@debug@", 1, true), "marker lines themselves should be gone")
+        -- The version placeholder must survive stripping; the packager's
+        -- vcs_filter substitutes it with the git tag. A hardcoded version
+        -- here is why every release so far reported "1.0" in-game.
+        T.assertContains(body, "## Version: @project-version@",
+            "the .toc must carry the version placeholder, not a hardcoded number")
     end)
 
     T.test("REL-03: a full game can be played through", function()

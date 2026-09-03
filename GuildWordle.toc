@@ -2,7 +2,7 @@
 ## Title: GuildWordle
 ## Notes: In-game Wordle with daily guild leaderboard
 ## Author: Bonnie
-## Version: 1.0
+## Version: @project-version@
 ## X-License: MIT
 ## X-Curse-Project-ID: 1644878
 ## SavedVariables: GuildWordleDB
