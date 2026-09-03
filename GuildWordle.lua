@@ -260,13 +260,13 @@ end
 -- ── Nickname ─────────────────────────────────────────────────────────────────
 -- Account-wide (like the streak itself), since the streak leaderboard needs
 -- one stable label per account regardless of which alt is currently logged
--- in. Characters/commas/semicolons are stripped since nicknames travel over
--- the same ","/";"-delimited addon-message format as streak/result entries.
+-- in. Characters ",", ";" and ">" are stripped since nicknames travel over
+-- the same delimited addon-message format as streak/result/rename entries.
 
 local MAX_NICK_LEN = 16
 
 function GW.SetNickname(raw)
-    local name = strtrim(raw or ""):gsub("[,;]", "")
+    local name = strtrim(raw or ""):gsub("[,;>]", "")
     if name == "" then
         print("|cffFFD700[GuildWordle]|r Current nickname: \"" ..
             (GuildWordleDB.settings.nickname or "") .. "\"  (use /wordle nick <name> to change it)")
@@ -274,9 +274,27 @@ function GW.SetNickname(raw)
     end
     if #name > MAX_NICK_LEN then name = name:sub(1, MAX_NICK_LEN) end
 
+    local oldName = GuildWordleDB.settings.nickname
+    if oldName == name then
+        print("|cffFFD700[GuildWordle]|r Nickname is already \"" .. name .. "\".")
+        return
+    end
+
     GuildWordleDB.settings.nickname = name
+
+    -- Remove the stale entry under the old nickname from every guild bucket
+    -- we know about locally (an account can have entries across multiple
+    -- guilds from different alts), so a rename doesn't leave a duplicate row
+    -- sitting in the streak leaderboard under the old name.
+    if oldName and oldName ~= "" then
+        for _, board in pairs(GuildWordleDB.streakBoard) do
+            board[oldName] = nil
+        end
+    end
+
     print("|cffFFD700[GuildWordle]|r Nickname set to \"" .. name .. "\".")
     if GW.OnNicknameChanged then GW.OnNicknameChanged() end
+    GW.BroadcastNicknameRename(oldName, name)
     GW.BroadcastStreak()
 end
 
@@ -288,6 +306,21 @@ function GW.ResetGame()
         GuildWordleFrame:Show()
     end
     print("|cffFFD700[GuildWordle]|r Today's game has been reset.")
+end
+
+-- Dev/testing aid: wipes every guild's daily-results leaderboard and streak
+-- leaderboard, and resets this account's own streak back to zero, so the
+-- whole leaderboard feature can be tested from a clean slate repeatedly.
+-- Unlike GW.ResetGame, this does NOT touch today's in-progress puzzle.
+function GW.ResetLeaderboard()
+    GuildWordleDB.leaderboard  = {}
+    GuildWordleDB.streakBoard  = {}
+    GuildWordleDB.streak       = { current = 0, best = 0, lastDate = nil }
+    if GuildWordleFrame and GuildWordleFrame:IsShown() then
+        GuildWordleFrame:Hide()
+        GuildWordleFrame:Show()
+    end
+    print("|cffFFD700[GuildWordle]|r Leaderboard and streak data reset (dev/testing).")
 end
 
 -- ── Game logic ────────────────────────────────────────────────────────────────
@@ -494,6 +527,17 @@ function GW.BroadcastStreak()
     flush()
 end
 
+-- One-shot notice so other clients prune their copy of our old nickname's
+-- streak-board entry instead of it lingering as a stale duplicate forever —
+-- there's no periodic re-send of this (unlike the two functions above), so a
+-- client that's offline when the rename happens simply won't see it; that's
+-- an accepted gap given how rarely nicknames actually change.
+function GW.BroadcastNicknameRename(oldNick, newNick)
+    if not IsInGuild() then return end
+    if not oldNick or oldNick == "" or oldNick == newNick then return end
+    SendAddonMsg("NICKRENAME:" .. oldNick .. ">" .. newNick)
+end
+
 local function HandleAddonMessage(prefix, text, channel, sender)
     if prefix ~= ADDON_PREFIX then return end
     local today = GetDateString()
@@ -559,6 +603,16 @@ local function HandleAddonMessage(prefix, text, channel, sender)
                 end
             end
             if changed and GW.OnStreakBoardUpdate then GW.OnStreakBoardUpdate() end
+        end
+
+    elseif text:sub(1,11) == "NICKRENAME:" then
+        local oldNick, newNick = text:sub(12):match("^([^>]+)>([^>]*)$")
+        if oldNick then
+            local board = GuildWordleDB.streakBoard[GW.CurrentGuildKey()]
+            if board and board[oldNick] then
+                board[oldNick] = nil
+                if GW.OnStreakBoardUpdate then GW.OnStreakBoardUpdate() end
+            end
         end
     end
 end
@@ -664,6 +718,8 @@ SlashCmdList["GUILDWORDLE"] = function(msg)
         GW.SetNickname(raw:sub(6))
     elseif lower == "reset" then
         GW.ResetGame()
+    elseif lower == "reset-leaderboard" then
+        GW.ResetLeaderboard()
     else
         if GuildWordleFrame then
             if GuildWordleFrame:IsShown() then
