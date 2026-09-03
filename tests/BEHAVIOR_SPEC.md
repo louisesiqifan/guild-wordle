@@ -1,8 +1,9 @@
 # GuildWordle — Expected Behavior Specification
 
-Status: **draft, pending review**. Nothing here is implemented yet — this describes what the test
-suite should verify, in plain language, before any test code is written. Once approved, each item
-becomes one or more automated tests (or, for UAT items, a manual checklist run in-game).
+Status: **reviewed and implemented.** Sections 1, 2, 4 and 5 are automated (145 tests,
+`./tests/run_all.sh`); section 3 is a manual in-game checklist, driven by the dev panel described in
+section 4. Tests reference these IDs by name, so this file stays the source of truth: **add the
+spec entry before writing the test.**
 
 ## Purpose and scope
 
@@ -20,12 +21,11 @@ globals (`UnitName`, `GetRealmName`, `GetGuildInfo`, `IsInGuild`, `IsInGroup`, `
 `SendChatMessage`, `C_ChatInfo`/`SendAddonMessage`, `C_Timer`, `CreateFrame` for one event frame,
 `date`/`time`, `seterrorhandler`/`geterrorhandler`, `strtrim`), all mockable in plain Lua.
 
-**Out of scope for automated tests (`GuildWordle_UI.lua`):** this file is wall-to-wall
-`CreateFrame`/`SetPoint`/texture/font calls against WoW's live widget system — there is no
-practical way to run it headless, and mocking enough of the frame API to make it meaningful would
-itself become a second UI toolkit. Its *behavior* is still specified below, under UAT, as a manual
-in-game checklist. Where UI-file logic is simple enough to peel out and test in isolation (e.g.
-`TruncName`'s truncation math, which just calls `GW.TruncateUTF8`), that's called out explicitly.
+**Partially in scope (`GuildWordle_UI.lua`):** this file is wall-to-wall
+`CreateFrame`/`SetPoint`/texture/font calls against WoW's live widget system. It *can* be loaded
+against the mock (see section 5), which makes its render paths testable for robustness against
+awkward data — but the mock's geometry is meaningless (widths/heights stub to 0), so **layout and
+anything visual stays manual UAT** (section 3).
 
 **Test levels used below:**
 - **Unit** — one function, isolated, mocked inputs. Runs in a plain Lua interpreter against the
@@ -666,12 +666,24 @@ broadcasting. Closing the panel also turns dev mode off, so "dev mode ⟺ panel 
   "Best" tabs show visibly different sets.
 - **DEV-07**: The simulated rename updates in place — the row count is unchanged and the old
   nickname is gone, not duplicated. (This is the bug that shipped once.)
+- **DEV-07b**: The rename reaches **both** boards. A real rename sends `NICKS:` *and* `STREAKS:`
+  (`GW.SetNickname` broadcasts both), because the two boards carry the nickname differently: the
+  results board looks it up from `charNicknames`, the streak board stores it as a field on the
+  entry. An action sending only `NICKS:` updates the Today tab and leaves Streak/Best showing the
+  old name — a state no real client can produce. This shipped broken once.
 - **DEV-08**: The stale-echo action cannot revive a broken streak, but `best` still rises —
   demonstrating the freshness gate and best-only-increases rules together.
 - **DEV-09**: Forced win/loss produce a coherent finished game (`guesses`/`results` same length, or
   `CurrentGame()`'s corruption repair would wipe it) and a matching own-result row.
 - **DEV-10**: The streak helpers set 5/10, and the "break" helper produces a stale `lastDate` that
   reads as broken immediately.
+- **DEV-10b**: Those helpers also push the result onto the guild streak board, or the tabs keep
+  showing whatever was there before.
+- **DEV-10c**: Every action that changes local state out-of-band triggers a **full-window** refresh
+  via `GW.RefreshMainUI`, not just `GW.OnStreakBoardUpdate`. The left-column streak label, share
+  button and grid are refreshed by file-local functions in `GuildWordle_UI.lua` that otherwise only
+  run on frame-show — without the full refresh those actions repainted the tabbed panel and left the
+  label stale until the window was closed and reopened. This shipped broken once.
 - **DEV-11**: "Clear fake data" removes every `Zzt`-prefixed entry from all three tables and leaves
   real data untouched.
 - **DEV-12/13**: Panel visibility follows `devMode`; `/wordle dev` toggles both together; re-showing
