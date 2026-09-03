@@ -8,7 +8,38 @@ on:
       - main
 
 jobs:
+  # Gate: the release job below will not start unless this passes. Tests run
+  # against the merge commit specifically -- the same tree that's about to be
+  # tagged and published -- not against the PR branch's pre-merge state, so a
+  # bad interaction introduced by the merge itself still blocks the release.
+  test:
+    name: Lua tests
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout merge commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      # LuaJIT specifically, NOT lua5.4/5.5 -- see .github/workflows/tests.yml
+      # for why the interpreter choice is load-bearing here.
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit
+
+      - name: Verify Lua 5.1 semantics
+        run: |
+          luajit -e 'assert(_VERSION == "Lua 5.1", "expected Lua 5.1 semantics, got " .. _VERSION)'
+          luajit -e 'local ok = pcall(function() return ("x"):gsub("[\0-\64]", "") end)
+                     assert(not ok, "interpreter accepted a pattern WoW 5.1 rejects -- wrong Lua")'
+
+      - name: Run test suite
+        run: bash tests/run_all.sh
+
   release:
+    needs: test
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
