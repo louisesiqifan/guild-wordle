@@ -157,8 +157,14 @@ end
 -- Identifies the current character (not the account), since the account can
 -- have multiple characters — each must get its own daily game, not a shared
 -- one. Includes realm since character names can collide across realms.
+-- UnitName("player")/GetRealmName() can both return nil very early during
+-- addon load (before realm/unit info is fully populated) — falling back to
+-- "" instead of letting that concatenation throw is what stands between a
+-- momentary API hiccup and InitDB() aborting partway through, permanently
+-- leaving later tables (streakBoard, charNicknames) uninitialized for the
+-- rest of the session since InitDB() is never retried.
 local function CharKey()
-    return UnitName("player") .. "-" .. GetRealmName()
+    return (UnitName("player") or "") .. "-" .. (GetRealmName() or "")
 end
 
 -- Identifies the current character's guild, since the account can have
@@ -173,6 +179,14 @@ end
 
 local function InitDB()
     GuildWordleDB = GuildWordleDB or {}
+    -- Every table other code reads/writes without a nil-check is initialized
+    -- FIRST, before anything below that calls into WoW APIs (UnitName,
+    -- GetRealmName via CharKey) that can — rarely, but not impossibly —
+    -- return nil very early during addon load. InitDB() only ever runs once
+    -- per session (at ADDON_LOADED), so if something later in this function
+    -- throws, these tables must already be in a safe state; otherwise every
+    -- caller for the rest of the session hits the same nil-table error with
+    -- no way to recover short of a full /reload.
     GuildWordleDB.leaderboard = GuildWordleDB.leaderboard or {}
     GuildWordleDB.games = GuildWordleDB.games or {}
     GuildWordleDB.settings = GuildWordleDB.settings or {}
@@ -183,11 +197,22 @@ local function InitDB()
     -- whichever character on a given day keeps the streak going, since it's
     -- tracking "did this account solve today", not any one character's run.
     GuildWordleDB.streak = GuildWordleDB.streak or { current = 0, best = 0, lastDate = nil }
+    -- Per-guild streak leaderboard: streakBoard[guildKey][accountId] =
+    -- {nickname, current, best, lastDate}, synced via the same gossip
+    -- pattern as the daily results leaderboard below.
+    GuildWordleDB.streakBoard = GuildWordleDB.streakBoard or {}
+    -- Per-guild charName -> nickname lookup, gossiped separately (see
+    -- GW.BroadcastCharNicknames) so the RESULTS: wire format itself never has
+    -- to change — old and new clients keep sending/parsing the exact same
+    -- 4-field results message either way, and nickname is purely a
+    -- display-time lookup layered on top for clients that understand it.
+    GuildWordleDB.charNicknames = GuildWordleDB.charNicknames or {}
+
     -- Account-wide nickname shown on the guild streak leaderboard (streaks
     -- are account-wide but the character name changes per alt) — defaults to
     -- the current character's name the first time any character on this
     -- account opens the addon after this update.
-    GuildWordleDB.settings.nickname = GuildWordleDB.settings.nickname or UnitName("player")
+    GuildWordleDB.settings.nickname = GuildWordleDB.settings.nickname or UnitName("player") or "Player"
     -- One-time cleanup: a nickname could have been saved by an earlier build
     -- of this addon, before GW.SetNickname enforced letters-only, and would
     -- otherwise keep being broadcast with digits/punctuation intact forever.
@@ -196,7 +221,7 @@ local function InitDB()
     -- a no-op once the value is already clean.
     do
         local cleaned = GuildWordleDB.settings.nickname:gsub("[\0-\64\91-\96\123-\127]", "")
-        if cleaned == "" then cleaned = UnitName("player") end
+        if cleaned == "" then cleaned = UnitName("player") or "Player" end
         GuildWordleDB.settings.nickname = cleaned
     end
     -- Stable, hidden per-account identity key for the streak leaderboard —
@@ -213,16 +238,6 @@ local function InitDB()
     -- change) is just a display field riding along inside each entry — see
     -- GW.RecordOwnStreakEntry / streakBoard below.
     GuildWordleDB.accountId = GuildWordleDB.accountId or CharKey()
-    -- Per-guild streak leaderboard: streakBoard[guildKey][accountId] =
-    -- {nickname, current, best, lastDate}, synced via the same gossip
-    -- pattern as the daily results leaderboard below.
-    GuildWordleDB.streakBoard = GuildWordleDB.streakBoard or {}
-    -- Per-guild charName -> nickname lookup, gossiped separately (see
-    -- GW.BroadcastCharNicknames) so the RESULTS: wire format itself never has
-    -- to change — old and new clients keep sending/parsing the exact same
-    -- 4-field results message either way, and nickname is purely a
-    -- display-time lookup layered on top for clients that understand it.
-    GuildWordleDB.charNicknames = GuildWordleDB.charNicknames or {}
 
     local cutoff = tonumber(date("%Y%m%d", time() - 7*86400))
 
@@ -573,6 +588,11 @@ end
 -- local per-guild map, so it shows up correctly even before any gossip
 -- round-trip.
 function GW.RecordOwnCharNickname()
+    -- Defensive: InitDB() only runs once per session, so if it ever aborted
+    -- before reaching its own charNicknames init (see the reordering note
+    -- there), self-heal here rather than erroring on every render for the
+    -- rest of the session.
+    GuildWordleDB.charNicknames = GuildWordleDB.charNicknames or {}
     local guildKey = GW.CurrentGuildKey()
     GuildWordleDB.charNicknames[guildKey] = GuildWordleDB.charNicknames[guildKey] or {}
     local names = GuildWordleDB.charNicknames[guildKey]
@@ -642,6 +662,8 @@ end
 -- board under its accountId, so it shows up in its own ranking immediately —
 -- not just after a round-trip through guild chat.
 function GW.RecordOwnStreakEntry()
+    -- Defensive: same reasoning as GW.RecordOwnCharNickname above.
+    GuildWordleDB.streakBoard = GuildWordleDB.streakBoard or {}
     local guildKey = GW.CurrentGuildKey()
     local s        = GW.CurrentStreak()
     GuildWordleDB.streakBoard[guildKey] = GuildWordleDB.streakBoard[guildKey] or {}
@@ -718,6 +740,7 @@ local function HandleAddonMessage(prefix, text, channel, sender)
         if rest and rest ~= "" then
             local changed   = false
             local guildKey  = GW.CurrentGuildKey()
+            GuildWordleDB.charNicknames = GuildWordleDB.charNicknames or {}
             GuildWordleDB.charNicknames[guildKey] = GuildWordleDB.charNicknames[guildKey] or {}
             local names = GuildWordleDB.charNicknames[guildKey]
             for entry in rest:gmatch("[^;]+") do
@@ -735,6 +758,7 @@ local function HandleAddonMessage(prefix, text, channel, sender)
         if rest and rest ~= "" then
             local changed  = false
             local guildKey = GW.CurrentGuildKey()
+            GuildWordleDB.streakBoard = GuildWordleDB.streakBoard or {}
             GuildWordleDB.streakBoard[guildKey] = GuildWordleDB.streakBoard[guildKey] or {}
             local board = GuildWordleDB.streakBoard[guildKey]
             for entry in rest:gmatch("[^;]+") do
