@@ -298,8 +298,21 @@ function GW.SetNickname(raw)
     end
 
     GuildWordleDB.settings.nickname = name
+
+    -- If this character already has a results-leaderboard entry for today,
+    -- refresh its nickname field too — otherwise it'd keep showing whatever
+    -- name was current at the moment the game ended until reset the next
+    -- day (the streak board doesn't have this problem since it rewrites the
+    -- nickname field on every broadcast via GW.RecordOwnStreakEntry).
+    local guildKey    = GW.CurrentGuildKey()
+    local today       = GetDateString()
+    local todayBoard  = GuildWordleDB.leaderboard[guildKey] and GuildWordleDB.leaderboard[guildKey][today]
+    local mine        = todayBoard and todayBoard[UnitName("player")]
+    if mine then mine.nickname = name end
+
     print("|cffFFD700[GuildWordle]|r Nickname set to \"" .. name .. "\".")
     if GW.OnNicknameChanged then GW.OnNicknameChanged() end
+    if IsInGuild() then GW.BroadcastKnownResults() end
     GW.BroadcastStreak()
 end
 
@@ -365,11 +378,15 @@ function GW.OnGameEnd(won)
     local packed   = PackResults(game.results)
     local guildKey = GW.CurrentGuildKey()
 
-    -- Save locally first, scoped to the guild this character is actually in
+    -- Save locally first, scoped to the guild this character is actually in.
+    -- Still keyed by character name (not accountId) — alts each keep their
+    -- own row on today's leaderboard, same as always; nickname just rides
+    -- along as a display field.
     GuildWordleDB.leaderboard[guildKey] = GuildWordleDB.leaderboard[guildKey] or {}
     GuildWordleDB.leaderboard[guildKey][today] = GuildWordleDB.leaderboard[guildKey][today] or {}
     GuildWordleDB.leaderboard[guildKey][today][me] = {
         guesses = numGuess, solved = won, pattern = packed,
+        nickname = GuildWordleDB.settings.nickname,
     }
 
     GW.RecordStreakResult(won)
@@ -452,9 +469,20 @@ end
 -- knows* for today (not just its own result), so a result can reach a client
 -- secondhand through anyone who was online with both parties at different
 -- times, instead of requiring the original player to be online at that exact
--- moment. Entries are packed as "name,guesses,solved,pattern" joined by ";";
--- WoW addon messages are capped at ~255 chars, so a large leaderboard is split
--- across multiple messages rather than assumed to fit in one.
+-- moment. Entries are packed as "name,nickname,guesses,solved,pattern" joined
+-- by ";"; WoW addon messages are capped at ~255 chars, so a large leaderboard
+-- is split across multiple messages rather than assumed to fit in one.
+--
+-- Backwards compat: pre-nickname clients send/expect the older 4-field
+-- "name,guesses,solved,pattern" shape (no nickname). HandleAddonMessage below
+-- tries the current 5-field format first and falls back to parsing the old
+-- one, so an updated client can still read results from guildmates who
+-- haven't updated yet (displaying their character name in place of a
+-- nickname). The reverse isn't possible — an old client's fixed parser
+-- requires exactly 4 comma-fields, so a 5-field message from an updated
+-- client just fails to match and is silently skipped, same as any other
+-- unrecognized entry. That guildmate simply won't see the extra nickname
+-- entries until they update too; nothing breaks for them either way.
 
 local MAX_MSG_LEN = 200  -- payload budget per message, safely under the ~255-char cap
 
@@ -478,7 +506,7 @@ function GW.BroadcastKnownResults()
     end
 
     for name, d in pairs(lb) do
-        local entry = string.format("%s,%d,%s,%s", name, d.guesses, d.solved and "1" or "0", d.pattern)
+        local entry = string.format("%s,%s,%d,%s,%s", name, d.nickname or "", d.guesses, d.solved and "1" or "0", d.pattern)
         if batchLen + #entry + 1 > MAX_MSG_LEN and #batch > 0 then
             flush()
         end
@@ -557,12 +585,24 @@ local function HandleAddonMessage(prefix, text, channel, sender)
             GuildWordleDB.leaderboard[guildKey] = GuildWordleDB.leaderboard[guildKey] or {}
             GuildWordleDB.leaderboard[guildKey][today] = GuildWordleDB.leaderboard[guildKey][today] or {}
             for entry in rest:gmatch("[^;]+") do
-                local rName, rGuess, rSolved, rPat = entry:match("^([^,]+),(%d+),([01]),(.+)$")
+                -- Try the current "name,nickname,guesses,solved,pattern"
+                -- shape first; fall back to the older 4-field
+                -- "name,guesses,solved,pattern" shape (no nickname) sent by
+                -- guildmates who haven't updated yet — see the backwards
+                -- compat note above GW.BroadcastKnownResults.
+                local rName, rNick, rGuess, rSolved, rPat = entry:match("^([^,]+),([^,]*),(%d+),([01]),(.+)$")
+                if not rName then
+                    local oName, oGuess, oSolved, oPat = entry:match("^([^,]+),(%d+),([01]),(.+)$")
+                    if oName then
+                        rName, rNick, rGuess, rSolved, rPat = oName, nil, oGuess, oSolved, oPat
+                    end
+                end
                 if rName then
                     GuildWordleDB.leaderboard[guildKey][today][rName] = {
-                        guesses = tonumber(rGuess),
-                        solved  = rSolved == "1",
-                        pattern = rPat,
+                        guesses  = tonumber(rGuess),
+                        solved   = rSolved == "1",
+                        pattern  = rPat,
+                        nickname = (rNick and rNick ~= "") and rNick or rName,
                     }
                     changed = true
                 end
@@ -627,7 +667,7 @@ function GW.PrintLeaderboard()
 
     local entries = {}
     for n, d in pairs(lb) do
-        entries[#entries+1] = {name=n, guesses=d.guesses, solved=d.solved, pattern=d.pattern}
+        entries[#entries+1] = {name = d.nickname or n, guesses=d.guesses, solved=d.solved, pattern=d.pattern}
     end
     table.sort(entries, function(a, b)
         if a.solved ~= b.solved then return a.solved end
