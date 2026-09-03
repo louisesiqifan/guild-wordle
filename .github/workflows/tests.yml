@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# A newer push to the same branch supersedes an in-flight run; no point
+# finishing a check for a commit that's already been replaced.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lua tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # LuaJIT specifically, NOT lua5.4/5.5. WoW embeds Lua 5.1 and LuaJIT
+      # matches its semantics; newer Lua accepts pattern constructs WoW
+      # rejects at runtime. This addon already shipped a bug that passed
+      # under 5.5 and threw "malformed pattern (missing ']')" in-game, so a
+      # green run under the wrong interpreter would be actively misleading.
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit
+
+      - name: Show interpreter version
+        run: luajit -v && luajit -e 'print(_VERSION)'
+
+      # Guards the point above: if the runner ever resolves `luajit` to
+      # something that isn't Lua 5.1, fail loudly here rather than reporting
+      # a green suite that proves nothing.
+      - name: Verify Lua 5.1 semantics
+        run: |
+          luajit -e 'assert(_VERSION == "Lua 5.1", "expected Lua 5.1 semantics, got " .. _VERSION)'
+          luajit -e 'local ok = pcall(function() return ("x"):gsub("[\0-\64]", "") end)
+                     assert(not ok, "interpreter accepted a pattern WoW 5.1 rejects -- wrong Lua")'
+
+      # Invoked via `bash` rather than `./` because files created through the
+      # GitHub contents API land without the executable bit.
+      - name: Run test suite
+        run: bash tests/run_all.sh

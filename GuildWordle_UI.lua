@@ -6,8 +6,8 @@ local CELL     = TILE_SZ + 2 + TILE_GAP  -- 60px stride
 
 local GRID_W   = 5 * (TILE_SZ + 2) + 4 * TILE_GAP  -- 294px
 local GAME_W   = GRID_W + 26                         -- 320px  (game section)
-local LB_W     = 170                                 -- leaderboard section width
-local FRAME_W  = GAME_W + LB_W                       -- 490px total
+local LB_W     = 230                                 -- leaderboard section width (room for 15-char names)
+local FRAME_W  = GAME_W + LB_W                       -- 550px total
 local FRAME_H  = 626
 
 local GRID_X   = 13   -- (GAME_W - GRID_W) / 2
@@ -139,15 +139,26 @@ streakLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -42)
 streakLabel:SetWidth(GAME_W)
 streakLabel:SetJustifyH("CENTER")
 
-local function RefreshStreakLabel()
-    local s = GuildWordleDB.streak
-    if not s or (s.current == 0 and s.best == 0) then
-        streakLabel:SetText("")
-    elseif s.current > 0 then
-        streakLabel:SetText(string.format("|cffE8B84B%d-day streak|r  (best %d)", s.current, s.best))
+-- Pure formatter, kept separate from the widget so the wording is testable
+-- without a live FontString (the test mock has no real text storage).
+--
+-- A brand-new account (current and best both 0) previously rendered as the
+-- empty string, which just looked like a missing line -- indistinguishable
+-- from the label having failed to update. It now says so explicitly.
+function GW.StreakLabelText(s)
+    if not s then return "|cff888888No streak yet|r" end
+    if s.current > 0 then
+        local day = (s.current == 1) and "day" or "days"
+        return string.format("|cffE8B84B%d-%s streak|r  (best %d)", s.current, day, s.best)
+    elseif (s.best or 0) > 0 then
+        return string.format("|cff888888Streak broken|r  (best %d)", s.best)
     else
-        streakLabel:SetText(string.format("|cff888888Streak broken|r  (best %d)", s.best))
+        return "|cff888888No streak yet|r"
     end
+end
+
+local function RefreshStreakLabel()
+    streakLabel:SetText(GW.StreakLabelText(GW.CurrentStreak()))
 end
 
 -- Tile grid
@@ -272,34 +283,82 @@ local function RefreshKeyboard()
     end
 end
 
--- ── Leaderboard panel (top half of right column, scrollable) ─────────────────
--- Only VISIBLE_ROWS are shown at once — a mouse-wheel-scrollable viewport
--- rather than reserving fixed space for a large row count, so the window
--- doesn't grow with guild size. ROW_POOL_SIZE widgets are pre-created and
--- recycled; entries beyond that soft cap simply don't render (guild results
--- lists this large are not expected in practice).
+-- ── Leaderboard panel (top half of right column, scrollable, tabbed) ─────────
+-- Three tabs sharing one row-pool/scroll-viewport: today's results, the
+-- guild's active streaks, and the guild's all-time-best streaks. Only
+-- VISIBLE_ROWS are shown at once — a mouse-wheel-scrollable viewport rather
+-- than reserving fixed space for a large row count, so the window doesn't
+-- grow with guild size. ROW_POOL_SIZE widgets are pre-created and recycled;
+-- entries beyond that soft cap simply don't render.
 
 local LB_PAD = GAME_W + 10   -- content starts 10px past divider
 
+-- Tab row
+local TAB_Y = -26
+local TAB_H = 20
+local TAB_DEFS = {
+    {key = "results", label = "Today"},
+    {key = "current", label = "Streak"},
+    {key = "longest", label = "Best"},
+}
+
+local activeTab = "results"
+local tabButtons = {}
+local UpdateLBPanel      -- forward-declared: tab buttons below need to call it on click
+local SafeUpdateLBPanel  -- forward-declared: pcall-wrapped version; see definition below for why
+
+local function RefreshTabVisuals()
+    for _, def in ipairs(TAB_DEFS) do
+        local btn = tabButtons[def.key]
+        if def.key == activeTab then
+            btn.bg:SetColorTexture(0.20, 0.20, 0.26, 1)
+            btn.text:SetTextColor(1, 1, 1)
+        else
+            btn.bg:SetColorTexture(0, 0, 0, 0)
+            btn.text:SetTextColor(0.55, 0.55, 0.55)
+        end
+    end
+end
+
+do
+    local tabW = math.floor((LB_W - 16) / #TAB_DEFS)
+    for i, def in ipairs(TAB_DEFS) do
+        local btn = CreateFrame("Button", nil, frame)
+        btn:SetSize(tabW - 2, TAB_H)
+        btn:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD + (i-1) * tabW, TAB_Y)
+        btn.bg = btn:CreateTexture(nil, "BACKGROUND")
+        btn.bg:SetAllPoints()
+        btn.text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        btn.text:SetPoint("CENTER")
+        btn.text:SetText(def.label)
+        btn:SetScript("OnClick", function()
+            activeTab = def.key
+            RefreshTabVisuals()
+            SafeUpdateLBPanel()
+        end)
+        tabButtons[def.key] = btn
+    end
+end
+
 local lbTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-lbTitle:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, -32)
+lbTitle:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, TAB_Y - TAB_H - 6)
 
 local lbSubtitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-lbSubtitle:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, -50)
+lbSubtitle:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, TAB_Y - TAB_H - 24)
 lbSubtitle:SetWidth(LB_W - 12)
 lbSubtitle:SetTextColor(0.5, 0.5, 0.5)
 
 local VISIBLE_ROWS   = 14
 local LB_ROW_H       = 20
-local LB_ROW_Y0      = -68   -- y of the scroll viewport's top edge
+local LB_ROW_Y0      = TAB_Y - TAB_H - 42   -- y of the scroll viewport's top edge
 local ROW_POOL_SIZE  = 30
 local SCROLLBAR_RESERVE = 24 -- room for UIPanelScrollFrameTemplate's up/down buttons + track
 local LB_SCROLL_W    = (LB_W - 12) - SCROLLBAR_RESERVE
 
--- Tile colors for the hover tooltip (0=grey, 1=yellow, 2=green); reuses the
--- same filled square glyph for all three since color does the differentiating
--- here (unlike the plain-text glyphs used in chat messages, which can't rely
--- on color since chat channels strip |cff codes).
+-- Tile colors for the results-tab hover tooltip (0=grey, 1=yellow, 2=green);
+-- reuses the same filled square glyph for all three since color does the
+-- differentiating here (unlike the plain-text glyphs used in chat messages,
+-- which can't rely on color since chat channels strip |cff codes).
 local TOOLTIP_TILE_HEX = {[0] = "888888", [1] = "b59e3d", [2] = "538d4e"}
 
 local function AddPatternToTooltip(pattern)
@@ -353,36 +412,76 @@ for i = 1, ROW_POOL_SIZE do
         if not e then return end
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:AddLine(e.name, 1, 0.82, 0)
-        GameTooltip:AddLine(e.solved and (e.guesses .. "/6 · Solved") or "X/6 · Not solved", 1, 1, 1)
-        AddPatternToTooltip(e.pattern)
+        if e.charName and e.charName ~= e.name then
+            GameTooltip:AddLine("Played as " .. e.charName, 0.7, 0.7, 0.7)
+        end
+        if e.pattern then
+            GameTooltip:AddLine(e.solved and (e.guesses .. "/6 · Solved") or "X/6 · Not solved", 1, 1, 1)
+            AddPatternToTooltip(e.pattern)
+        elseif e.streakValue then
+            GameTooltip:AddLine(e.streakValue .. "-day streak", 1, 1, 1)
+        end
         GameTooltip:Show()
     end)
     hover:SetScript("OnLeave", function() GameTooltip:Hide() end)
     lbHovers[i] = hover
 end
 
-local function UpdateLBPanel()
-    if not GuildWordleDB then return end
+-- Shared by all three tabs: fills the row pool from a sorted {name=, ...}
+-- array, clears the rest, and sizes the scroll child to match.
+local function RenderRows(sorted, rowTextFn, entryFn)
+    for i = 1, ROW_POOL_SIZE do
+        local e = sorted[i]
+        if e then
+            lbRows[i]:SetText(rowTextFn(i, e))
+            lbHovers[i].entryData = entryFn(e)
+        else
+            lbRows[i]:SetText("")
+            lbHovers[i].entryData = nil
+        end
+    end
+    lbScrollChild:SetHeight(math.max(VISIBLE_ROWS, math.min(#sorted, ROW_POOL_SIZE)) * LB_ROW_H)
+end
+
+-- Uses GW.TruncateUTF8 (character-based, not byte-based) rather than a plain
+-- sub() since nicknames can contain accented/non-ASCII letters, where a
+-- byte-based cut could split a multi-byte character in half.
+local function TruncName(name)
+    local kept15 = GW.TruncateUTF8(name, 15)
+    if kept15 == name then return name end
+    return GW.TruncateUTF8(name, 14) .. "."
+end
+
+local function RenderResultsTab()
+    -- Self-refresh this character's own name->nickname mapping before
+    -- reading it, mirroring RenderStreakTab's GW.RecordOwnStreakEntry() call
+    -- below — otherwise a rename shows stale (old nickname, or no nickname
+    -- yet at all right after login) until some *other* event happens to
+    -- trigger a re-render, since GW.SetNickname refreshes the UI before its
+    -- own GW.BroadcastCharNicknames() call updates this lookup.
+    if GW.RecordOwnCharNickname then GW.RecordOwnCharNickname() end
+
     local today = date("%Y%m%d")
     local guildName = GetGuildInfo("player")
     lbTitle:SetText(guildName and ("|cffFFD700" .. guildName .. " Today|r") or "|cffFFD700No Guild|r")
 
-    local byGuild = GuildWordleDB.leaderboard and GuildWordleDB.leaderboard[GW.CurrentGuildKey()]
+    local guildKey = GW.CurrentGuildKey()
+    local byGuild = GuildWordleDB.leaderboard and GuildWordleDB.leaderboard[guildKey]
     local lb = byGuild and byGuild[today]
 
     if not lb or not next(lb) then
         lbSubtitle:SetText("No results yet")
-        for i = 1, ROW_POOL_SIZE do
-            lbRows[i]:SetText("")
-            lbHovers[i].entryData = nil
-        end
-        lbScrollChild:SetHeight(VISIBLE_ROWS * LB_ROW_H)
+        RenderRows({}, function() return "" end, function() return nil end)
         return
     end
 
+    local names = GuildWordleDB.charNicknames and GuildWordleDB.charNicknames[guildKey]
     local sorted = {}
     for name, data in pairs(lb) do
-        sorted[#sorted+1] = {name=name, guesses=data.guesses, solved=data.solved, pattern=data.pattern}
+        sorted[#sorted+1] = {
+            name = (names and names[name]) or name, charName = name,
+            guesses = data.guesses, solved = data.solved, pattern = data.pattern,
+        }
     end
     table.sort(sorted, function(a, b)
         if a.solved ~= b.solved then return a.solved end
@@ -391,24 +490,86 @@ local function UpdateLBPanel()
     end)
 
     lbSubtitle:SetText(#sorted .. " result" .. (#sorted ~= 1 and "s" or "") .. " today")
-    lbScrollChild:SetHeight(math.max(VISIBLE_ROWS, math.min(#sorted, ROW_POOL_SIZE)) * LB_ROW_H)
-
-    for i = 1, ROW_POOL_SIZE do
-        local e = sorted[i]
-        if e then
+    RenderRows(sorted,
+        function(i, e)
             local score = e.solved and (e.guesses .. "/6") or "X/6"
             local color = e.solved and "|cff538d4e" or "|cffcc4444"
-            local name  = #e.name > 9 and (e.name:sub(1,8) .. ".") or e.name
-            lbRows[i]:SetText(string.format("|cff888888%d.|r %-9s %s%s|r", i, name, color, score))
-            lbHovers[i].entryData = e
-        else
-            lbRows[i]:SetText("")
-            lbHovers[i].entryData = nil
+            return string.format("|cff888888%d.|r %-15s %s%s|r", i, TruncName(e.name), color, score)
+        end,
+        function(e) return e end)
+end
+
+-- mode: "current" (active streaks only, i.e. still-frozen ones excluded) or
+-- "longest" (all-time best, regardless of whether it's still active).
+local function RenderStreakTab(mode)
+    GW.RecordOwnStreakEntry()
+    local guildName = GetGuildInfo("player")
+    lbTitle:SetText(guildName and ("|cffFFD700" .. guildName .. " Streaks|r") or "|cffFFD700No Guild|r")
+
+    -- Keyed by accountId, not nickname (see GW.RecordOwnStreakEntry) — the
+    -- table key here is just an opaque identity, the display name always
+    -- comes from the .nickname field on each entry.
+    local board = GuildWordleDB.streakBoard and GuildWordleDB.streakBoard[GW.CurrentGuildKey()]
+    local sorted = {}
+    if board then
+        for _, d in pairs(board) do
+            local label = d.nickname or "?"
+            if mode == "current" and d.current and d.current > 0 then
+                sorted[#sorted+1] = {name = label, value = d.current}
+            elseif mode == "longest" and d.best and d.best > 0 then
+                sorted[#sorted+1] = {name = label, value = d.best}
+            end
         end
+    end
+    table.sort(sorted, function(a, b)
+        if a.value ~= b.value then return a.value > b.value end
+        return a.name < b.name
+    end)
+
+    if mode == "current" then
+        lbSubtitle:SetText(#sorted .. " active streak" .. (#sorted ~= 1 and "s" or ""))
+    else
+        lbSubtitle:SetText("All-time best")
+    end
+
+    RenderRows(sorted,
+        function(i, e)
+            return string.format("|cff888888%d.|r %-15s |cffE8B84B%d-day|r", i, TruncName(e.name), e.value)
+        end,
+        function(e) return {name = e.name, streakValue = e.value} end)
+end
+
+UpdateLBPanel = function()
+    if not GuildWordleDB then return end
+    if activeTab == "results" then
+        RenderResultsTab()
+    else
+        RenderStreakTab(activeTab)
     end
 end
 
-GW.OnLeaderboardUpdate = UpdateLBPanel
+-- Isolates the leaderboard panel from every caller: RefreshUI, DoSubmit, the
+-- tab buttons, GW.OnNicknameChanged (called from inside GW.SetNickname), and
+-- the gossip-update callbacks below all call into this instead of
+-- UpdateLBPanel directly. Without this, an error anywhere in
+-- RenderResultsTab/RenderStreakTab would propagate up and silently abort
+-- whatever *called* it too -- e.g. GW.SetNickname calls OnNicknameChanged
+-- before its own broadcast calls, so an uncaught error there would leave the
+-- nickname saved locally but never announced or reflected in the UI, looking
+-- exactly like "renaming doesn't work" with no visible cause. Printing the
+-- error (instead of failing silently) also means a future bug here is
+-- immediately diagnosable rather than presenting as a vague "the panel is
+-- empty" report.
+SafeUpdateLBPanel = function()
+    local ok, err = pcall(UpdateLBPanel)
+    if not ok then
+        print("|cffff4444[GuildWordle]|r Leaderboard panel error: " .. tostring(err))
+    end
+end
+
+RefreshTabVisuals()
+GW.OnLeaderboardUpdate = SafeUpdateLBPanel
+GW.OnStreakBoardUpdate = SafeUpdateLBPanel
 
 -- ── Announcements panel (bottom half of right column) ─────────────────────────
 -- Auto-share checkboxes + manual "Share results now" button live here rather
@@ -428,13 +589,60 @@ local announceLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 announceLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, ANNOUNCE_Y0)
 announceLabel:SetText("|cffFFD700Announcements|r")
 
+-- Nickname row — shown on the guild streak leaderboard since streaks are
+-- account-wide but the character name changes per alt. Mirrors /wordle nick
+-- <name> (both paths funnel through GW.SetNickname, so either stays in sync
+-- with the other).
+local NICK_ROW_H = 24
+local NICK_Y = ANNOUNCE_Y0 - 20
+
+local nickLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+nickLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", LB_PAD, NICK_Y)
+nickLabel:SetText("Nickname:")
+nickLabel:SetTextColor(0.8, 0.8, 0.8)
+
+local nickBox = CreateFrame("EditBox", "GuildWordleNickInput", frame, "InputBoxTemplate")
+nickBox:SetPoint("LEFT", nickLabel, "RIGHT", 6, -1)
+nickBox:SetSize(LB_W - 12 - (nickLabel:GetStringWidth() + 6) - 6, 20)
+nickBox:SetMaxLetters(15)
+nickBox:SetAutoFocus(false)
+nickBox:SetScript("OnEnterPressed", function(self)
+    GW.SetNickname(self:GetText())
+    self:ClearFocus()
+end)
+nickBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+nickBox:SetScript("OnEditFocusLost", function(self)
+    -- Also save on click-away, not just Enter, so a typed change isn't lost
+    -- if the player just clicks elsewhere. An emptied box is left alone
+    -- (reverts to the existing nickname on next refresh) rather than clearing
+    -- the nickname outright.
+    local typed = strtrim(self:GetText())
+    if typed ~= "" and typed ~= (GuildWordleDB.settings.nickname or "") then
+        GW.SetNickname(typed)
+    end
+end)
+
+local function RefreshNickBox()
+    if nickBox:HasFocus() then return end
+    nickBox:SetText(GuildWordleDB.settings.nickname or "")
+end
+
+-- A rename can happen while a streak tab is the active one showing the old
+-- name — refresh the leaderboard panel too, not just the text box, so the
+-- change is visible immediately instead of only after switching tabs away
+-- and back.
+GW.OnNicknameChanged = function()
+    RefreshNickBox()
+    SafeUpdateLBPanel()
+end
+
 local SHARE_CHANNELS = {"GUILD", "PARTY", "RAID"}
 local SHARE_LABELS = {GUILD = "Guild", PARTY = "Party", RAID = "Raid"}
 local CHECK_ROW_H = 24
 
 local autoShareChecks = {}
 for i, chan in ipairs(SHARE_CHANNELS) do
-    local y = ANNOUNCE_Y0 - 20 - (i-1) * CHECK_ROW_H
+    local y = ANNOUNCE_Y0 - 20 - NICK_ROW_H - (i-1) * CHECK_ROW_H
 
     local check = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
     check:SetSize(20, 20)
@@ -458,7 +666,7 @@ local function RefreshAutoShareChecks()
     end
 end
 
-local SHARE_NOW_Y = ANNOUNCE_Y0 - 20 - (#SHARE_CHANNELS * CHECK_ROW_H) - 10
+local SHARE_NOW_Y = ANNOUNCE_Y0 - 20 - NICK_ROW_H - (#SHARE_CHANNELS * CHECK_ROW_H) - 10
 
 -- Always visible (not just once the game ends): shows live progress while
 -- playing, and becomes the actual share action once the game is done.
@@ -476,6 +684,36 @@ local function RefreshShareNowButton()
         shareNowBtn:SetText("Share results now")
         shareNowBtn:Enable()
     end
+end
+
+-- ── Dev button ───────────────────────────────────────────────────────────────
+-- Only visible while dev mode is on (/wordle dev), and it's the only way to
+-- open the dev panel — the panel deliberately does NOT open by itself on
+-- login, since dev mode persists and having a debug window reappear on every
+-- reload is more annoying than useful. Tucked into the bottom-left corner so
+-- it never competes with the game controls.
+
+local devBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+devBtn:SetSize(52, 20)
+devBtn:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 8, 6)
+devBtn:SetText("Dev")
+devBtn:Hide()
+devBtn:SetScript("OnClick", function()
+    if GW.SetDevPanelShown then
+        GW.SetDevPanelShown(not (GW.IsDevPanelShown and GW.IsDevPanelShown()))
+    end
+end)
+
+-- Exposed so /wordle dev can reveal/hide the button immediately, rather than
+-- only on the next window open.
+--
+-- Requires GW.SetDevPanelShown to actually exist, not just devMode to be set:
+-- released builds have GuildWordle_Dev.lua stripped, and devMode is a plain
+-- SavedVariables flag anyone could hand-edit to true. Without this check that
+-- would show a button whose only action is a no-op.
+function GW.RefreshDevButton()
+    local on = GuildWordleDB and GuildWordleDB.settings and GuildWordleDB.settings.devMode
+    if on and GW.SetDevPanelShown then devBtn:Show() else devBtn:Hide() end
 end
 
 -- ── Grid helpers ─────────────────────────────────────────────────────────────
@@ -523,19 +761,24 @@ local function ShowGameResult(won)
         local msg = WIN_MSGS[#game.guesses] or "Got it!"
         statusText:SetText("|cff538d4e" .. msg .. "|r")
     else
-        statusText:SetText("|cffcc4444The word was: |r|cffFFFFFF" .. GW.todaysWord .. "|r")
+        statusText:SetText("|cffcc4444The word was: |r|cffFFFFFF" .. GW.CurrentWord() .. "|r")
     end
 end
 
 local function RefreshUI()
     frame:SetScale((GuildWordleDB.settings and GuildWordleDB.settings.scale) or 1)
 
+    -- Leaderboard panel refreshed last (and via the pcall-wrapped
+    -- SafeUpdateLBPanel) so a bug in that code path can't leave the rest of
+    -- this refresh — nickname box, share button, streak label — half-done.
     RefreshGrid()
     RefreshKeyboard()
-    UpdateLBPanel()
     RefreshAutoShareChecks()
     RefreshShareNowButton()
     RefreshStreakLabel()
+    RefreshNickBox()
+    GW.RefreshDevButton()
+    SafeUpdateLBPanel()
 
     local game = GW.CurrentGame()
     dateLabel:SetText("Puzzle · " .. date("%b %d, %Y"))
@@ -578,9 +821,9 @@ local function DoSubmit()
 
     inputBox:SetText("")
     RefreshKeyboard()
-    UpdateLBPanel()
     RefreshShareNowButton()
     RefreshStreakLabel()
+    SafeUpdateLBPanel()
 
     if done then
         ShowGameResult(won)
@@ -591,9 +834,29 @@ local function DoSubmit()
     end
 end
 
-submitBtn:SetScript("OnClick",        DoSubmit)
-inputBox:SetScript("OnEnterPressed",  DoSubmit)
+-- pcall-wrapped for the same reason as SafeUpdateLBPanel above: an uncaught
+-- error here would otherwise make pressing Enter/clicking Submit look like
+-- it just silently does nothing, with no visible cause.
+local function SafeDoSubmit()
+    local ok, err = pcall(DoSubmit)
+    if not ok then
+        print("|cffff4444[GuildWordle]|r Guess submission error: " .. tostring(err))
+    end
+end
+
+submitBtn:SetScript("OnClick",        SafeDoSubmit)
+inputBox:SetScript("OnEnterPressed",  SafeDoSubmit)
 inputBox:SetScript("OnTextChanged",   function(self) UpdatePreview(self:GetText()) end)
 inputBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 
 frame:SetScript("OnShow", RefreshUI)
+
+-- Full-window refresh, exposed because several pieces of this file
+-- (RefreshStreakLabel, RefreshShareNowButton, RefreshGrid, ...) are local and
+-- otherwise only run on frame-show or after a guess. Anything that changes
+-- local state out-of-band -- the dev panel's forced win/loss and streak
+-- helpers -- needs a way to make the whole window catch up, not just the
+-- leaderboard panel that GW.OnLeaderboardUpdate covers.
+function GW.RefreshMainUI()
+    if frame:IsShown() then RefreshUI() end
+end
