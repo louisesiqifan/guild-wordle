@@ -686,6 +686,31 @@ local function RefreshShareNowButton()
     end
 end
 
+-- ── Dev button ───────────────────────────────────────────────────────────────
+-- Only visible while dev mode is on (/wordle dev), and it's the only way to
+-- open the dev panel — the panel deliberately does NOT open by itself on
+-- login, since dev mode persists and having a debug window reappear on every
+-- reload is more annoying than useful. Tucked into the bottom-left corner so
+-- it never competes with the game controls.
+
+local devBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+devBtn:SetSize(52, 20)
+devBtn:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 8, 6)
+devBtn:SetText("Dev")
+devBtn:Hide()
+devBtn:SetScript("OnClick", function()
+    if GW.SetDevPanelShown then
+        GW.SetDevPanelShown(not (GW.IsDevPanelShown and GW.IsDevPanelShown()))
+    end
+end)
+
+-- Exposed so /wordle dev can reveal/hide the button immediately, rather than
+-- only on the next window open.
+function GW.RefreshDevButton()
+    local on = GuildWordleDB and GuildWordleDB.settings and GuildWordleDB.settings.devMode
+    if on then devBtn:Show() else devBtn:Hide() end
+end
+
 -- ── Grid helpers ─────────────────────────────────────────────────────────────
 
 local STATE_MAP = {[0]="grey", [1]="yellow", [2]="green"}
@@ -747,6 +772,7 @@ local function RefreshUI()
     RefreshShareNowButton()
     RefreshStreakLabel()
     RefreshNickBox()
+    GW.RefreshDevButton()
     SafeUpdateLBPanel()
 
     local game = GW.CurrentGame()
