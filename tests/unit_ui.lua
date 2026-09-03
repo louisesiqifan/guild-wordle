@@ -129,6 +129,31 @@ T.suite("5 UI render robustness", function()
             "and must report it rather than failing silently")
     end)
 
+    T.test("UI-12: the streak label always says something, including on a brand-new account", function()
+        -- A fresh account (or one just wiped by the dev panel's "Clear ALL
+        -- data") used to render the empty string here, which is
+        -- indistinguishable from the label having failed to update.
+        T.assertEquals(GW.StreakLabelText({current = 0, best = 0}), "|cff888888No streak yet|r",
+            "0/0 must not render as blank")
+        T.assertEquals(GW.StreakLabelText(nil), "|cff888888No streak yet|r",
+            "and neither must a missing streak table")
+    end)
+
+    T.test("UI-13: streak label wording covers active, broken and singular cases", function()
+        T.assertContains(GW.StreakLabelText({current = 5, best = 10}), "5-days streak")
+        T.assertContains(GW.StreakLabelText({current = 5, best = 10}), "best 10")
+
+        -- Participation-based streaks make a 1-day streak the common
+        -- first-play case, so it shouldn't read "1-days".
+        T.assertContains(GW.StreakLabelText({current = 1, best = 1}), "1-day streak")
+        T.assertFalse(GW.StreakLabelText({current = 1, best = 1}):find("1-days", 1, true),
+            "singular day should not be pluralised")
+
+        -- Broken means a skipped day now, since losing no longer resets.
+        T.assertContains(GW.StreakLabelText({current = 0, best = 7}), "Streak broken")
+        T.assertContains(GW.StreakLabelText({current = 0, best = 7}), "best 7")
+    end)
+
     T.test("UI-11: a rename mid-session re-renders without error and updates the mapping", function()
         setup()
         A.winToday()
