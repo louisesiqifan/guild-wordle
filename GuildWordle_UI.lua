@@ -293,7 +293,8 @@ local TAB_DEFS = {
 
 local activeTab = "results"
 local tabButtons = {}
-local UpdateLBPanel  -- forward-declared: tab buttons below need to call it on click
+local UpdateLBPanel      -- forward-declared: tab buttons below need to call it on click
+local SafeUpdateLBPanel  -- forward-declared: pcall-wrapped version; see definition below for why
 
 local function RefreshTabVisuals()
     for _, def in ipairs(TAB_DEFS) do
@@ -322,7 +323,7 @@ do
         btn:SetScript("OnClick", function()
             activeTab = def.key
             RefreshTabVisuals()
-            UpdateLBPanel()
+            SafeUpdateLBPanel()
         end)
         tabButtons[def.key] = btn
     end
@@ -536,9 +537,28 @@ UpdateLBPanel = function()
     end
 end
 
+-- Isolates the leaderboard panel from every caller: RefreshUI, DoSubmit, the
+-- tab buttons, GW.OnNicknameChanged (called from inside GW.SetNickname), and
+-- the gossip-update callbacks below all call into this instead of
+-- UpdateLBPanel directly. Without this, an error anywhere in
+-- RenderResultsTab/RenderStreakTab would propagate up and silently abort
+-- whatever *called* it too -- e.g. GW.SetNickname calls OnNicknameChanged
+-- before its own broadcast calls, so an uncaught error there would leave the
+-- nickname saved locally but never announced or reflected in the UI, looking
+-- exactly like "renaming doesn't work" with no visible cause. Printing the
+-- error (instead of failing silently) also means a future bug here is
+-- immediately diagnosable rather than presenting as a vague "the panel is
+-- empty" report.
+SafeUpdateLBPanel = function()
+    local ok, err = pcall(UpdateLBPanel)
+    if not ok then
+        print("|cffff4444[GuildWordle]|r Leaderboard panel error: " .. tostring(err))
+    end
+end
+
 RefreshTabVisuals()
-GW.OnLeaderboardUpdate = UpdateLBPanel
-GW.OnStreakBoardUpdate = UpdateLBPanel
+GW.OnLeaderboardUpdate = SafeUpdateLBPanel
+GW.OnStreakBoardUpdate = SafeUpdateLBPanel
 
 -- ── Announcements panel (bottom half of right column) ─────────────────────────
 -- Auto-share checkboxes + manual "Share results now" button live here rather
@@ -602,7 +622,7 @@ end
 -- and back.
 GW.OnNicknameChanged = function()
     RefreshNickBox()
-    UpdateLBPanel()
+    SafeUpdateLBPanel()
 end
 
 local SHARE_CHANNELS = {"GUILD", "PARTY", "RAID"}
@@ -707,13 +727,16 @@ end
 local function RefreshUI()
     frame:SetScale((GuildWordleDB.settings and GuildWordleDB.settings.scale) or 1)
 
+    -- Leaderboard panel refreshed last (and via the pcall-wrapped
+    -- SafeUpdateLBPanel) so a bug in that code path can't leave the rest of
+    -- this refresh — nickname box, share button, streak label — half-done.
     RefreshGrid()
     RefreshKeyboard()
-    UpdateLBPanel()
     RefreshAutoShareChecks()
     RefreshShareNowButton()
     RefreshStreakLabel()
     RefreshNickBox()
+    SafeUpdateLBPanel()
 
     local game = GW.CurrentGame()
     dateLabel:SetText("Puzzle · " .. date("%b %d, %Y"))
@@ -756,9 +779,9 @@ local function DoSubmit()
 
     inputBox:SetText("")
     RefreshKeyboard()
-    UpdateLBPanel()
     RefreshShareNowButton()
     RefreshStreakLabel()
+    SafeUpdateLBPanel()
 
     if done then
         ShowGameResult(won)
