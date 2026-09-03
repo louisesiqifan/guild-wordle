@@ -10,3 +10,4 @@
 words.lua
 GuildWordle.lua
 GuildWordle_UI.lua
+GuildWordle_Dev.lua
