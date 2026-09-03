@@ -39,6 +39,24 @@ local function GetTodaysWord()
     return GuildWordle_Answers[(x % #GuildWordle_Answers) + 1]:upper()
 end
 
+-- Returns today's word, computing (and caching) it on demand instead of
+-- relying solely on a one-time ADDON_LOADED assignment. This is what lets
+-- every caller self-heal if that assignment never ran (e.g. an earlier error
+-- in InitDB() aborted the ADDON_LOADED handler before reaching it — the
+-- exact failure mode that caused "attempt to index local 'answer' (a nil
+-- value)" on every guess), and it also keeps the word correct if the
+-- calendar date rolls over during a long play session, rather than staying
+-- stuck on a cached word computed for the previous day.
+local cachedWordDate
+function GW.CurrentWord()
+    local today = GetDateString()
+    if not GW.todaysWord or cachedWordDate ~= today then
+        GW.todaysWord = GetTodaysWord()
+        cachedWordDate = today
+    end
+    return GW.todaysWord
+end
+
 -- Hash set for O(1) guess validation against the ~14,800-word NYT dictionary.
 local ValidWordSet = {}
 for _, w in ipairs(GuildWordle_ValidWords or {}) do
@@ -413,7 +431,7 @@ function GW.SubmitGuess(raw)
     local lower = guess:lower()
     if not ValidWordSet[lower] then return false, "not_a_word" end
 
-    local result = EvaluateGuess(guess, GW.todaysWord)
+    local result = EvaluateGuess(guess, GW.CurrentWord())
     game.guesses[#game.guesses+1] = guess
     game.results[#game.results+1] = result
 
@@ -806,7 +824,7 @@ function GW.PrintLeaderboard()
 
     print("|cffFFD700===== GuildWordle · " .. date("%B %d, %Y") .. " =====|r")
     if hasPlayed then
-        print("|cff888888Today's word: " .. GW.todaysWord .. "|r")
+        print("|cff888888Today's word: " .. GW.CurrentWord() .. "|r")
     end
 
     local names = GuildWordleDB.charNicknames[guildKey]
@@ -827,6 +845,26 @@ function GW.PrintLeaderboard()
     end
 end
 
+-- ── Dev mode ─────────────────────────────────────────────────────────────────
+-- /wordle dev toggles a blanket error-visibility aid: while on, every
+-- uncaught Lua error from ANY addon (not just this one — seterrorhandler is
+-- client-wide, there's no way to scope it to a single addon's errors) prints
+-- to chat, on top of whatever the previous handler already did (the default
+-- Lua-error popup, if "Show Lua Errors" happens to be enabled). This exists
+-- because several bugs this session were completely silent otherwise —
+-- rather than manually pcall-wrapping every new call site as bugs are found,
+-- dev mode surfaces the next one immediately. Persisted (not session-only)
+-- since the bugs worth chasing with this are often at ADDON_LOADED time,
+-- which needs a /reload to reproduce — losing the toggle on reload would
+-- defeat the purpose.
+local previousErrorHandler = geterrorhandler()
+seterrorhandler(function(msg)
+    if GuildWordleDB and GuildWordleDB.settings and GuildWordleDB.settings.devMode then
+        print("|cffff4444[GuildWordle DEV]|r " .. tostring(msg))
+    end
+    return previousErrorHandler(msg)
+end)
+
 -- ── Events & slash ───────────────────────────────────────────────────────────
 
 local ev = CreateFrame("Frame")
@@ -837,7 +875,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
         if (...) == "GuildWordle" then
             InitDB()
-            GW.todaysWord = GetTodaysWord()
+            GW.CurrentWord()  -- prime the cache; self-heals later regardless if this doesn't run
             if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
                 C_ChatInfo.RegisterAddonMessagePrefix(ADDON_PREFIX)
             elseif RegisterAddonMessagePrefix then
@@ -896,6 +934,13 @@ SlashCmdList["GUILDWORDLE"] = function(msg)
         GW.ResetGame()
     elseif lower == "reset-leaderboard" then
         GW.ResetLeaderboard()
+    elseif lower == "dev" then
+        GuildWordleDB.settings.devMode = not GuildWordleDB.settings.devMode
+        if GuildWordleDB.settings.devMode then
+            print("|cffFFD700[GuildWordle]|r Dev mode |cff00ff00ON|r — all Lua errors (any addon) will print to chat.")
+        else
+            print("|cffFFD700[GuildWordle]|r Dev mode |cffff4444OFF|r.")
+        end
     else
         if GuildWordleFrame then
             if GuildWordleFrame:IsShown() then
