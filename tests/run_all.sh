@@ -26,6 +26,8 @@ FILES=(
     unit_streak.lua
     unit_wire.lua
     unit_resilience.lua
+    unit_devpanel.lua
+    unit_ui.lua
     integration.lua
 )
 
