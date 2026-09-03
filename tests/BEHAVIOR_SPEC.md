@@ -1,6 +1,6 @@
 # GuildWordle — Expected Behavior Specification
 
-Status: **reviewed and implemented.** Sections 1, 2, 4 and 5 are automated (151 tests,
+Status: **reviewed and implemented.** Sections 1, 2, 4 and 5 are automated (155 tests,
 `./tests/run_all.sh`); section 3 is a manual in-game checklist, driven by the dev panel described in
 section 4. Tests reference these IDs by name, so this file stays the source of truth: **add the
 spec entry before writing the test.**
@@ -697,8 +697,15 @@ broadcasting. Closing the panel also turns dev mode off, so "dev mode ⟺ panel 
   label stale until the window was closed and reopened. This shipped broken once.
 - **DEV-11**: "Clear fake data" removes every `Zzt`-prefixed entry from all three tables and leaves
   real data untouched.
-- **DEV-12/13**: Panel visibility follows `devMode`; `/wordle dev` toggles both together; re-showing
-  after hiding reuses the frame rather than rebuilding it.
+- **DEV-12**: The panel opens and closes on demand, reusing its frame rather than rebuilding it.
+- **DEV-13**: `/wordle dev` toggles `devMode` but **does not open the panel**. Dev mode's job is to
+  reveal a small **Dev** button in the main window's bottom-left corner; that button opens the
+  panel. Auto-opening on login was the original behavior and was wrong: `devMode` persists, so a
+  debug window reappeared on every `/reload`.
+- **DEV-13b**: Leaving dev mode *closes* an open panel — otherwise it'd be stranded, since the Dev
+  button that reopens it disappears with dev mode.
+- **DEV-13c**: The inverse — closing the panel (via its X) must **not** silently exit dev mode. The
+  Dev button stays available to reopen it.
 - **DEV-14 (SYNC_REQ preview)**: `SYNC_REQ` is the one action that's about *outgoing* behavior —
   a guildmate asking "catch me up", answered by re-broadcasting everything known. That's invisible
   in the usual testing setup twice over: every broadcast function early-returns when not in a
@@ -744,6 +751,10 @@ by design — a broken render would otherwise register as a pass.
   the dev panel's "Clear ALL data" — has `current` and `best` both 0, which previously rendered as
   the empty string; that's indistinguishable from the label having failed to update, so it now
   reads "No streak yet". Same for a missing streak table.
+- **UI-14**: The Dev button tracks `devMode` (hidden when off, shown when on) and is the only
+  entry point to the panel — turning dev mode on reveals the button but must not open the panel.
+- **UI-15**: A full window refresh (`RefreshUI`, which runs on frame show) includes the Dev button,
+  so it appears as soon as the window is opened rather than waiting for some unrelated event.
 - **UI-13**: Label wording covers all three states — active (`N-days streak (best M)`), broken
   (`Streak broken (best M)`, which since the participation change means a *skipped day*, never a
   loss), and the singular case (`1-day streak`, not `1-days`) — which is now the common first-play
