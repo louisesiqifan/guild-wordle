@@ -364,7 +364,7 @@ end
 
 local MAX_NICK_LEN = 15
 
-function GW.SetNickname(raw)
+local function SetNicknameImpl(raw)
     local trimmed = strtrim(raw or "")
     if trimmed == "" then
         print("|cffFFD700[GuildWordle]|r Current nickname: \"" ..
@@ -390,6 +390,18 @@ function GW.SetNickname(raw)
     if GW.OnNicknameChanged then GW.OnNicknameChanged() end
     GW.BroadcastStreak()
     GW.BroadcastCharNicknames()
+end
+
+-- pcall-wrapped and always prints on failure (not gated behind dev mode,
+-- unlike the blanket error handler above) since this is called directly from
+-- both the slash command and the UI nickname box with no other error
+-- visibility in between — an uncaught error here would otherwise look
+-- exactly like "nothing happens" when renaming.
+function GW.SetNickname(raw)
+    local ok, err = pcall(SetNicknameImpl, raw)
+    if not ok then
+        print("|cffff4444[GuildWordle]|r Nickname error: " .. tostring(err))
+    end
 end
 
 function GW.ResetGame()
