@@ -39,6 +39,24 @@ local function GetTodaysWord()
     return GuildWordle_Answers[(x % #GuildWordle_Answers) + 1]:upper()
 end
 
+-- Returns today's word, computing (and caching) it on demand instead of
+-- relying solely on a one-time ADDON_LOADED assignment. This is what lets
+-- every caller self-heal if that assignment never ran (e.g. an earlier error
+-- in InitDB() aborted the ADDON_LOADED handler before reaching it — the
+-- exact failure mode that caused "attempt to index local 'answer' (a nil
+-- value)" on every guess), and it also keeps the word correct if the
+-- calendar date rolls over during a long play session, rather than staying
+-- stuck on a cached word computed for the previous day.
+local cachedWordDate
+function GW.CurrentWord()
+    local today = GetDateString()
+    if not GW.todaysWord or cachedWordDate ~= today then
+        GW.todaysWord = GetTodaysWord()
+        cachedWordDate = today
+    end
+    return GW.todaysWord
+end
+
 -- Hash set for O(1) guess validation against the ~14,800-word NYT dictionary.
 local ValidWordSet = {}
 for _, w in ipairs(GuildWordle_ValidWords or {}) do
@@ -110,6 +128,45 @@ local function StripRealm(fullName)
     return (fullName:match("^([^%-]+)")) or fullName
 end
 
+-- Truncates to at most `maxChars` *characters*, not bytes, without ever
+-- splitting a multi-byte UTF-8 sequence in half — needed because nicknames
+-- can contain accented/non-ASCII letters (see GW.SetNickname), where one
+-- character can be 2-4 bytes; a plain byte-based sub() could otherwise cut
+-- a character in half and leave a corrupted/garbled trailing byte.
+function GW.TruncateUTF8(str, maxChars)
+    local chars, i, len = 0, 1, #str
+    while i <= len do
+        local b = str:byte(i)
+        local charLen
+        if     b < 0x80  then charLen = 1
+        elseif b >= 0xF0 then charLen = 4
+        elseif b >= 0xE0 then charLen = 3
+        elseif b >= 0xC0 then charLen = 2
+        else                  charLen = 1  -- stray continuation byte; don't hang
+        end
+        chars = chars + 1
+        if chars > maxChars then return str:sub(1, i - 1) end
+        i = i + charLen
+    end
+    return str
+end
+
+-- Strips everything except letters: ASCII a-z/A-Z are kept via %a, and any
+-- byte ≥128 is kept too, since a valid multi-byte UTF-8 sequence for an
+-- accented/non-ASCII letter is built entirely from such bytes. Deliberately
+-- avoids Lua pattern character-class byte-range escapes (e.g. the tempting
+-- "[\0-\64\91-\96\123-\127]") — that parses and runs fine in some Lua
+-- versions (verified in 5.5) but throws "malformed pattern (missing ']')" in
+-- WoW's actual embedded Lua 5.1, discovered the hard way when it broke
+-- GW.SetNickname outright. A per-byte gsub callback with a plain %a check
+-- sidesteps that version difference entirely.
+local function FilterLetters(s)
+    return (s:gsub(".", function(c)
+        if c:byte() >= 128 or c:match("%a") then return c end
+        return ""
+    end))
+end
+
 local function SafeDelay(secs, fn)
     if C_Timer and C_Timer.After then
         C_Timer.After(secs, fn)
@@ -134,8 +191,14 @@ end
 -- Identifies the current character (not the account), since the account can
 -- have multiple characters — each must get its own daily game, not a shared
 -- one. Includes realm since character names can collide across realms.
+-- UnitName("player")/GetRealmName() can both return nil very early during
+-- addon load (before realm/unit info is fully populated) — falling back to
+-- "" instead of letting that concatenation throw is what stands between a
+-- momentary API hiccup and InitDB() aborting partway through, permanently
+-- leaving later tables (streakBoard, charNicknames) uninitialized for the
+-- rest of the session since InitDB() is never retried.
 local function CharKey()
-    return UnitName("player") .. "-" .. GetRealmName()
+    return (UnitName("player") or "") .. "-" .. (GetRealmName() or "")
 end
 
 -- Identifies the current character's guild, since the account can have
@@ -150,6 +213,14 @@ end
 
 local function InitDB()
     GuildWordleDB = GuildWordleDB or {}
+    -- Every table other code reads/writes without a nil-check is initialized
+    -- FIRST, before anything below that calls into WoW APIs (UnitName,
+    -- GetRealmName via CharKey) that can — rarely, but not impossibly —
+    -- return nil very early during addon load. InitDB() only ever runs once
+    -- per session (at ADDON_LOADED), so if something later in this function
+    -- throws, these tables must already be in a safe state; otherwise every
+    -- caller for the rest of the session hits the same nil-table error with
+    -- no way to recover short of a full /reload.
     GuildWordleDB.leaderboard = GuildWordleDB.leaderboard or {}
     GuildWordleDB.games = GuildWordleDB.games or {}
     GuildWordleDB.settings = GuildWordleDB.settings or {}
@@ -160,6 +231,47 @@ local function InitDB()
     -- whichever character on a given day keeps the streak going, since it's
     -- tracking "did this account solve today", not any one character's run.
     GuildWordleDB.streak = GuildWordleDB.streak or { current = 0, best = 0, lastDate = nil }
+    -- Per-guild streak leaderboard: streakBoard[guildKey][accountId] =
+    -- {nickname, current, best, lastDate}, synced via the same gossip
+    -- pattern as the daily results leaderboard below.
+    GuildWordleDB.streakBoard = GuildWordleDB.streakBoard or {}
+    -- Per-guild charName -> nickname lookup, gossiped separately (see
+    -- GW.BroadcastCharNicknames) so the RESULTS: wire format itself never has
+    -- to change — old and new clients keep sending/parsing the exact same
+    -- 4-field results message either way, and nickname is purely a
+    -- display-time lookup layered on top for clients that understand it.
+    GuildWordleDB.charNicknames = GuildWordleDB.charNicknames or {}
+
+    -- Account-wide nickname shown on the guild streak leaderboard (streaks
+    -- are account-wide but the character name changes per alt) — defaults to
+    -- the current character's name the first time any character on this
+    -- account opens the addon after this update.
+    GuildWordleDB.settings.nickname = GuildWordleDB.settings.nickname or UnitName("player") or "Player"
+    -- One-time cleanup: a nickname could have been saved by an earlier build
+    -- of this addon, before GW.SetNickname enforced letters-only, and would
+    -- otherwise keep being broadcast with digits/punctuation intact forever.
+    -- Re-applying the same filter here guarantees every *stored* nickname
+    -- satisfies the invariant, not just ones set going forward. Idempotent —
+    -- a no-op once the value is already clean.
+    do
+        local cleaned = FilterLetters(GuildWordleDB.settings.nickname)
+        if cleaned == "" then cleaned = UnitName("player") or "Player" end
+        GuildWordleDB.settings.nickname = cleaned
+    end
+    -- Stable, hidden per-account identity key for the streak leaderboard —
+    -- frozen the first time any character on this account ever loads the
+    -- addon, and never re-evaluated after that (this `or` only actually
+    -- calls CharKey() once, ever; every later login on any alt/realm just
+    -- reuses the stored value). It happens to be shaped like a character's
+    -- CharKey purely because that's a convenient, Blizzard-guaranteed-unique
+    -- string to grab at that first moment — it is NOT treated as "the
+    -- current character" anywhere after this line, and stays correct even
+    -- if that original character is later renamed, transferred, or deleted.
+    -- This exists so the streak leaderboard can key entries by something
+    -- that never changes, while the player-facing nickname (which CAN
+    -- change) is just a display field riding along inside each entry — see
+    -- GW.RecordOwnStreakEntry / streakBoard below.
+    GuildWordleDB.accountId = GuildWordleDB.accountId or CharKey()
 
     local cutoff = tonumber(date("%Y%m%d", time() - 7*86400))
 
@@ -205,26 +317,109 @@ end
 
 -- Updates the account-wide streak the first time *any* character finishes
 -- today's game; later completions by other characters the same day are
--- no-ops (the day is already accounted for). A win extends the streak only
--- if the previous recorded day was literally yesterday — a skipped day, not
--- just a loss, also breaks it. Losing resets the streak to 0 immediately.
-function GW.RecordStreakResult(won)
+-- no-ops (the day is already accounted for).
+--
+-- The streak measures PARTICIPATION, not success: finishing today's puzzle
+-- extends it whether you solved the word or not. The only thing that breaks
+-- a streak is skipping a day entirely — which is why this takes no win/loss
+-- argument. (It deliberately did reset on a loss at one point; that made the
+-- streak a skill metric rather than a "did you show up" one.)
+function GW.RecordStreakResult()
     local s     = GuildWordleDB.streak
     local today = GetDateString()
     if s.lastDate == today then return end
 
-    if won then
-        local yesterday = date("%Y%m%d", time() - 86400)
-        if s.current > 0 and s.lastDate == yesterday then
-            s.current = s.current + 1
-        else
-            s.current = 1
-        end
-        if s.current > s.best then s.best = s.current end
+    local yesterday = date("%Y%m%d", time() - 86400)
+    if s.current > 0 and s.lastDate == yesterday then
+        s.current = s.current + 1
     else
-        s.current = 0
+        s.current = 1
     end
+    if s.current > s.best then s.best = s.current end
     s.lastDate = today
+end
+
+-- Returns the account-wide streak table, first zeroing out `current` if the
+-- last recorded day is older than yesterday — i.e. the player skipped at
+-- least one full day without playing at all, which is the ONLY thing that
+-- breaks a streak now that losing doesn't (see GW.RecordStreakResult).
+-- That function already gets this right at the moment of the *next*
+-- completed game (a stale lastDate fails the "extend" check and falls
+-- through to a reset), but without this, anything that just *reads* the
+-- streak (the UI label, /wordle streak, or a broadcast to the guild streak
+-- board) would keep showing the old count until the player next plays. Call
+-- this instead of reading GuildWordleDB.streak directly anywhere outside
+-- RecordStreakResult.
+function GW.CurrentStreak()
+    local s = GuildWordleDB.streak
+    if s.current > 0 then
+        local today     = GetDateString()
+        local yesterday = date("%Y%m%d", time() - 86400)
+        if s.lastDate ~= today and s.lastDate ~= yesterday then
+            s.current = 0
+        end
+    end
+    return s
+end
+
+-- ── Nickname ─────────────────────────────────────────────────────────────────
+-- Account-wide (like the streak itself), since the streak leaderboard needs
+-- one stable label per account regardless of which alt is currently logged
+-- in. It's purely a *display* field inside each streakBoard entry — entries
+-- are actually keyed by GuildWordleDB.accountId (see InitDB), so renaming is
+-- just an in-place field update, the same as current/best/lastDate already
+-- are; no delete-and-recreate dance, no separate rename message needed.
+-- Letters only — digits, spaces, and punctuation (including commas/
+-- semicolons) are stripped, since nicknames travel over the same delimited
+-- addon-message formats as everything else and a stray digit or delimiter
+-- character could otherwise be misread as part of a different field by a
+-- client parsing an older/simpler wire format. Accented/non-ASCII letters
+-- (é, ñ, ö, Cyrillic, CJK, ...) ARE allowed: the filter only strips bytes in
+-- the ASCII range that aren't a-z/A-Z, leaving any byte ≥128 alone. This is
+-- still wire-safe — a valid multi-byte UTF-8 sequence is built entirely from
+-- bytes ≥128, so it can never contain a literal comma (44) or semicolon (59),
+-- both of which are ASCII and still get stripped.
+
+local MAX_NICK_LEN = 15
+
+local function SetNicknameImpl(raw)
+    local trimmed = strtrim(raw or "")
+    if trimmed == "" then
+        print("|cffFFD700[GuildWordle]|r Current nickname: \"" ..
+            (GuildWordleDB.settings.nickname or "") .. "\"  (use /wordle nick <name> to change it)")
+        return
+    end
+
+    local name = FilterLetters(trimmed)
+    if name == "" then
+        print("|cffFFD700[GuildWordle]|r Nicknames can only contain letters.")
+        return
+    end
+    name = GW.TruncateUTF8(name, MAX_NICK_LEN)
+
+    if GuildWordleDB.settings.nickname == name then
+        print("|cffFFD700[GuildWordle]|r Nickname is already \"" .. name .. "\".")
+        return
+    end
+
+    GuildWordleDB.settings.nickname = name
+
+    print("|cffFFD700[GuildWordle]|r Nickname set to \"" .. name .. "\".")
+    if GW.OnNicknameChanged then GW.OnNicknameChanged() end
+    GW.BroadcastStreak()
+    GW.BroadcastCharNicknames()
+end
+
+-- pcall-wrapped and always prints on failure (not gated behind dev mode,
+-- unlike the blanket error handler above) since this is called directly from
+-- both the slash command and the UI nickname box with no other error
+-- visibility in between — an uncaught error here would otherwise look
+-- exactly like "nothing happens" when renaming.
+function GW.SetNickname(raw)
+    local ok, err = pcall(SetNicknameImpl, raw)
+    if not ok then
+        print("|cffff4444[GuildWordle]|r Nickname error: " .. tostring(err))
+    end
 end
 
 function GW.ResetGame()
@@ -235,6 +430,22 @@ function GW.ResetGame()
         GuildWordleFrame:Show()
     end
     print("|cffFFD700[GuildWordle]|r Today's game has been reset.")
+end
+
+-- Dev/testing aid: wipes every guild's daily-results leaderboard and streak
+-- leaderboard, and resets this account's own streak back to zero, so the
+-- whole leaderboard feature can be tested from a clean slate repeatedly.
+-- Unlike GW.ResetGame, this does NOT touch today's in-progress puzzle.
+function GW.ResetLeaderboard()
+    GuildWordleDB.leaderboard   = {}
+    GuildWordleDB.streakBoard   = {}
+    GuildWordleDB.charNicknames = {}
+    GuildWordleDB.streak        = { current = 0, best = 0, lastDate = nil }
+    if GuildWordleFrame and GuildWordleFrame:IsShown() then
+        GuildWordleFrame:Hide()
+        GuildWordleFrame:Show()
+    end
+    print("|cffFFD700[GuildWordle]|r Leaderboard and streak data reset (dev/testing).")
 end
 
 -- ── Game logic ────────────────────────────────────────────────────────────────
@@ -250,7 +461,7 @@ function GW.SubmitGuess(raw)
     local lower = guess:lower()
     if not ValidWordSet[lower] then return false, "not_a_word" end
 
-    local result = EvaluateGuess(guess, GW.todaysWord)
+    local result = EvaluateGuess(guess, GW.CurrentWord())
     game.guesses[#game.guesses+1] = guess
     game.results[#game.results+1] = result
 
@@ -274,17 +485,25 @@ function GW.OnGameEnd(won)
     local packed   = PackResults(game.results)
     local guildKey = GW.CurrentGuildKey()
 
-    -- Save locally first, scoped to the guild this character is actually in
+    -- Save locally first, scoped to the guild this character is actually in.
+    -- Still keyed by character name — alts each keep their own row on
+    -- today's leaderboard, same as always. Nickname is NOT stored here; it's
+    -- resolved at display time from GuildWordleDB.charNicknames instead, so
+    -- this entry's shape (and the RESULTS: wire format below) stays exactly
+    -- what pre-nickname clients already understand.
     GuildWordleDB.leaderboard[guildKey] = GuildWordleDB.leaderboard[guildKey] or {}
     GuildWordleDB.leaderboard[guildKey][today] = GuildWordleDB.leaderboard[guildKey][today] or {}
     GuildWordleDB.leaderboard[guildKey][today][me] = {
         guesses = numGuess, solved = won, pattern = packed,
     }
 
-    GW.RecordStreakResult(won)
+    -- Takes no argument: playing is what counts, not winning (see above).
+    GW.RecordStreakResult()
 
     if IsInGuild() then
         GW.BroadcastKnownResults()
+        GW.BroadcastStreak()
+        GW.BroadcastCharNicknames()
     end
 
     GW.AutoShareResult()
@@ -360,9 +579,12 @@ end
 -- knows* for today (not just its own result), so a result can reach a client
 -- secondhand through anyone who was online with both parties at different
 -- times, instead of requiring the original player to be online at that exact
--- moment. Entries are packed as "name,guesses,solved,pattern" joined by ";";
--- WoW addon messages are capped at ~255 chars, so a large leaderboard is split
--- across multiple messages rather than assumed to fit in one.
+-- moment. Entries are packed as "name,guesses,solved,pattern" joined by ";"
+-- — this wire format is unchanged from before nicknames existed, on purpose
+-- (see GW.BroadcastCharNicknames below for how nicknames are layered on top
+-- without touching this). WoW addon messages are capped at ~255 chars, so a
+-- large leaderboard is split across multiple messages rather than assumed to
+-- fit in one.
 
 local MAX_MSG_LEN = 200  -- payload budget per message, safely under the ~255-char cap
 
@@ -396,6 +618,137 @@ function GW.BroadcastKnownResults()
     flush()
 end
 
+-- ── Character nicknames (gossip) ──────────────────────────────────────────────
+-- A separate, purely-additive broadcast that maps this guild's known
+-- charName -> nickname pairs, kept entirely independent of
+-- GW.BroadcastKnownResults so the RESULTS: wire format never has to change.
+-- Old clients don't recognize the "NICKS:" prefix and silently ignore it,
+-- exactly like they already ignore "STREAKS:" — nothing breaks for them, they
+-- just never learn any nicknames (and never send any either, so a New client
+-- looking at an Old client's results just falls back to showing their
+-- character name, which is the same thing Old clients show anyway).
+-- Not date-scoped (a nickname isn't "today" data) and — unlike the streak
+-- board — doesn't need freshness/rollback merge logic: this is a display-only
+-- label, so a stale echo momentarily showing an old nickname isn't a
+-- correctness problem the way a stale streak count would be, and it
+-- self-corrects on the next periodic broadcast.
+
+-- Writes this character's own name -> current nickname pairing into the
+-- local per-guild map, so it shows up correctly even before any gossip
+-- round-trip.
+function GW.RecordOwnCharNickname()
+    -- Defensive: InitDB() only runs once per session, so if it ever aborted
+    -- before reaching its own charNicknames init (see the reordering note
+    -- there), self-heal here rather than erroring on every render for the
+    -- rest of the session.
+    GuildWordleDB.charNicknames = GuildWordleDB.charNicknames or {}
+    local guildKey = GW.CurrentGuildKey()
+    GuildWordleDB.charNicknames[guildKey] = GuildWordleDB.charNicknames[guildKey] or {}
+    local names = GuildWordleDB.charNicknames[guildKey]
+    names[UnitName("player")] = GuildWordleDB.settings.nickname
+
+    -- Also refresh any *other* of this account's characters already known to
+    -- be in *this* guild, so a rename while playing this character doesn't
+    -- leave an alt's cached mapping stale in other guildmates' clients until
+    -- that alt itself logs back in and rebroadcasts. Safe to do: cross-
+    -- referencing GuildWordleDB.games (account-wide — every character on
+    -- this account that's played recently) against this guild's own results
+    -- leaderboard (guild-scoped) can only ever confirm characters that are
+    -- BOTH mine AND already independently known to belong to this guild —
+    -- never widen this to characters not already confirmed here, since
+    -- leaderboard/gossip data must stay scoped to the guild it came from.
+    local byGuild = GuildWordleDB.leaderboard[guildKey]
+    if byGuild then
+        local knownInGuild = {}
+        for _, byDate in pairs(byGuild) do
+            for charName in pairs(byDate) do knownInGuild[charName] = true end
+        end
+        for charKey in pairs(GuildWordleDB.games) do
+            local charName = charKey:match("^([^%-]+)")
+            if charName and knownInGuild[charName] then
+                names[charName] = GuildWordleDB.settings.nickname
+            end
+        end
+    end
+end
+
+function GW.BroadcastCharNicknames()
+    if not IsInGuild() then return end
+    GW.RecordOwnCharNickname()
+    local names = GuildWordleDB.charNicknames[GW.CurrentGuildKey()]
+    if not names or not next(names) then return end
+
+    local header = "NICKS:"
+    local batch, batchLen = {}, #header
+
+    local function flush()
+        if #batch > 0 then
+            SendAddonMsg(header .. table.concat(batch, ";"))
+            batch, batchLen = {}, #header
+        end
+    end
+
+    for charName, nick in pairs(names) do
+        local entry = string.format("%s,%s", charName, nick)
+        if batchLen + #entry + 1 > MAX_MSG_LEN and #batch > 0 then
+            flush()
+        end
+        batch[#batch+1] = entry
+        batchLen = batchLen + #entry + 1
+    end
+    flush()
+end
+
+-- ── Streak leaderboard (gossip) ───────────────────────────────────────────────
+-- Same gossip shape as GW.BroadcastKnownResults above, but keyed by the
+-- stable per-account accountId (see InitDB) rather than character name,
+-- since the streak itself is account-wide — and not date-scoped, since a
+-- streak isn't "today's" data the way a guess result is. The player-facing
+-- nickname rides along as a plain field inside each entry, so renaming is
+-- just an ordinary field update on the existing key, not a new entry.
+
+-- Writes this account's own live streak into the local per-guild streak
+-- board under its accountId, so it shows up in its own ranking immediately —
+-- not just after a round-trip through guild chat.
+function GW.RecordOwnStreakEntry()
+    -- Defensive: same reasoning as GW.RecordOwnCharNickname above.
+    GuildWordleDB.streakBoard = GuildWordleDB.streakBoard or {}
+    local guildKey = GW.CurrentGuildKey()
+    local s        = GW.CurrentStreak()
+    GuildWordleDB.streakBoard[guildKey] = GuildWordleDB.streakBoard[guildKey] or {}
+    GuildWordleDB.streakBoard[guildKey][GuildWordleDB.accountId] = {
+        nickname = GuildWordleDB.settings.nickname,
+        current = s.current, best = s.best, lastDate = s.lastDate or "0",
+    }
+end
+
+function GW.BroadcastStreak()
+    if not IsInGuild() then return end
+    GW.RecordOwnStreakEntry()
+    local board = GuildWordleDB.streakBoard[GW.CurrentGuildKey()]
+    if not board or not next(board) then return end
+
+    local header = "STREAKS:"
+    local batch, batchLen = {}, #header
+
+    local function flush()
+        if #batch > 0 then
+            SendAddonMsg(header .. table.concat(batch, ";"))
+            batch, batchLen = {}, #header
+        end
+    end
+
+    for id, d in pairs(board) do
+        local entry = string.format("%s,%s,%d,%d,%s", id, d.nickname or "", d.current, d.best, d.lastDate or "0")
+        if batchLen + #entry + 1 > MAX_MSG_LEN and #batch > 0 then
+            flush()
+        end
+        batch[#batch+1] = entry
+        batchLen = batchLen + #entry + 1
+    end
+    flush()
+end
+
 local function HandleAddonMessage(prefix, text, channel, sender)
     if prefix ~= ADDON_PREFIX then return end
     local today = GetDateString()
@@ -404,6 +757,8 @@ local function HandleAddonMessage(prefix, text, channel, sender)
 
     if text == "SYNC_REQ" and name ~= me then
         GW.BroadcastKnownResults()
+        GW.BroadcastStreak()
+        GW.BroadcastCharNicknames()
 
     elseif text:sub(1,8) == "RESULTS:" then
         local _, _, rDate, rest = text:find("^RESULTS:([^:]+):(.+)$")
@@ -428,6 +783,59 @@ local function HandleAddonMessage(prefix, text, channel, sender)
             end
             if changed and GW.OnLeaderboardUpdate then GW.OnLeaderboardUpdate() end
         end
+
+    elseif text:sub(1,6) == "NICKS:" then
+        local rest = text:sub(7)
+        if rest and rest ~= "" then
+            local changed   = false
+            local guildKey  = GW.CurrentGuildKey()
+            GuildWordleDB.charNicknames = GuildWordleDB.charNicknames or {}
+            GuildWordleDB.charNicknames[guildKey] = GuildWordleDB.charNicknames[guildKey] or {}
+            local names = GuildWordleDB.charNicknames[guildKey]
+            for entry in rest:gmatch("[^;]+") do
+                local rChar, rNick = entry:match("^([^,]+),([^,]*)$")
+                if rChar and rNick and rNick ~= "" and names[rChar] ~= rNick then
+                    names[rChar] = rNick
+                    changed = true
+                end
+            end
+            if changed and GW.OnLeaderboardUpdate then GW.OnLeaderboardUpdate() end
+        end
+
+    elseif text:sub(1,8) == "STREAKS:" then
+        local rest = text:sub(9)
+        if rest and rest ~= "" then
+            local changed  = false
+            local guildKey = GW.CurrentGuildKey()
+            GuildWordleDB.streakBoard = GuildWordleDB.streakBoard or {}
+            GuildWordleDB.streakBoard[guildKey] = GuildWordleDB.streakBoard[guildKey] or {}
+            local board = GuildWordleDB.streakBoard[guildKey]
+            for entry in rest:gmatch("[^;]+") do
+                local rId, rNick, rCur, rBest, rDate = entry:match("^([^,]+),([^,]*),(%d+),(%d+),(%d+)$")
+                if rId then
+                    local existing = board[rId]
+                    -- "best" only ever moves up, regardless of message freshness.
+                    local newBest = tonumber(rBest)
+                    if existing and existing.best and existing.best > newBest then
+                        newBest = existing.best
+                    end
+                    -- Only accept the incoming "current"/"nickname" if it's at
+                    -- least as fresh (same-or-later lastDate) as what we
+                    -- already have — otherwise a delayed/stale gossip echo
+                    -- could make an already-broken streak appear active again,
+                    -- or roll a rename back to the old name. Dates are
+                    -- YYYYMMDD strings, so lexical >= is numerically correct.
+                    if not existing or rDate >= (existing.lastDate or "0") then
+                        board[rId] = { nickname = rNick, current = tonumber(rCur), best = newBest, lastDate = rDate }
+                        changed = true
+                    elseif newBest > (existing.best or 0) then
+                        existing.best = newBest
+                        changed = true
+                    end
+                end
+            end
+            if changed and GW.OnStreakBoardUpdate then GW.OnStreakBoardUpdate() end
+        end
     end
 end
 
@@ -447,12 +855,13 @@ function GW.PrintLeaderboard()
 
     print("|cffFFD700===== GuildWordle · " .. date("%B %d, %Y") .. " =====|r")
     if hasPlayed then
-        print("|cff888888Today's word: " .. GW.todaysWord .. "|r")
+        print("|cff888888Today's word: " .. GW.CurrentWord() .. "|r")
     end
 
+    local names = GuildWordleDB.charNicknames[guildKey]
     local entries = {}
     for n, d in pairs(lb) do
-        entries[#entries+1] = {name=n, guesses=d.guesses, solved=d.solved, pattern=d.pattern}
+        entries[#entries+1] = {name = (names and names[n]) or n, guesses=d.guesses, solved=d.solved, pattern=d.pattern}
     end
     table.sort(entries, function(a, b)
         if a.solved ~= b.solved then return a.solved end
@@ -467,6 +876,35 @@ function GW.PrintLeaderboard()
     end
 end
 
+-- ── Error visibility ─────────────────────────────────────────────────────────
+-- Two layers, so "a function silently does nothing when it fails" can't
+-- happen again the way it did repeatedly this session (the charNicknames nil
+-- crash, the nil-word crash, the malformed nickname pattern — all completely
+-- silent until manually pcall-wrapped one at a time):
+--
+-- 1. Any uncaught error whose traceback mentions this addon's own files
+--    ALWAYS prints to chat, unconditionally — no toggle needed, since these
+--    are always worth seeing. Errors from OTHER addons only print while
+--    /wordle dev is on (see below), since printing every other addon's
+--    errors unconditionally would be noisy and isn't this addon's business.
+-- 2. Call sites reached directly from a UI event with no other error
+--    handling in between (slash command dispatch, DoSubmit, the leaderboard
+--    panel refresh, GW.SetNickname) are additionally pcall-wrapped at that
+--    entry point, so one failing step can't silently abort unrelated
+--    sibling steps in the same caller (e.g. a bug in the leaderboard render
+--    previously aborted the rest of GW.SetNickname, including its own
+--    broadcast calls, before this was added).
+local previousErrorHandler = geterrorhandler()
+seterrorhandler(function(msg)
+    local text = tostring(msg)
+    if text:find("AddOns/GuildWordle/", 1, true) then
+        print("|cffff4444[GuildWordle]|r " .. text)
+    elseif GuildWordleDB and GuildWordleDB.settings and GuildWordleDB.settings.devMode then
+        print("|cffff4444[GuildWordle DEV]|r " .. text)
+    end
+    return previousErrorHandler(msg)
+end)
+
 -- ── Events & slash ───────────────────────────────────────────────────────────
 
 local ev = CreateFrame("Frame")
@@ -477,7 +915,7 @@ ev:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
         if (...) == "GuildWordle" then
             InitDB()
-            GW.todaysWord = GetTodaysWord()
+            GW.CurrentWord()  -- prime the cache; self-heals later regardless if this doesn't run
             if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
                 C_ChatInfo.RegisterAddonMessagePrefix(ADDON_PREFIX)
             elseif RegisterAddonMessagePrefix then
@@ -488,7 +926,11 @@ ev:SetScript("OnEvent", function(self, event, ...)
             -- results keep propagating across a session instead of only at login.
             if C_Timer and C_Timer.NewTicker then
                 C_Timer.NewTicker(300, function()
-                    if IsInGuild() then GW.BroadcastKnownResults() end
+                    if IsInGuild() then
+                        GW.BroadcastKnownResults()
+                        GW.BroadcastStreak()
+                        GW.BroadcastCharNicknames()
+                    end
                 end)
             end
         end
@@ -498,28 +940,74 @@ ev:SetScript("OnEvent", function(self, event, ...)
             if not IsInGuild() then return end
             SendAddonMsg("SYNC_REQ")
             GW.BroadcastKnownResults()
+            GW.BroadcastStreak()
+            GW.BroadcastCharNicknames()
         end)
 
     elseif event == "CHAT_MSG_ADDON" then
-        HandleAddonMessage(...)
+        -- pcall-wrapped so a malformed/unexpected incoming gossip message
+        -- can't silently break addon-message handling for the rest of the
+        -- session with no visibility into why.
+        local ok, err = pcall(HandleAddonMessage, ...)
+        if not ok then
+            print("|cffff4444[GuildWordle]|r Addon message handling error: " .. tostring(err))
+        end
     end
 end)
 
 SLASH_GUILDWORDLE1 = "/wordle"
-SlashCmdList["GUILDWORDLE"] = function(msg)
-    msg = strtrim(msg):lower()
-    if msg == "lb" or msg == "leaderboard" then
+
+-- Wrapped as a whole (rather than each subcommand individually) so any
+-- future subcommand automatically gets the same protection: a bug in one
+-- branch can't look like "the slash command just does nothing" the way the
+-- nickname and leaderboard bugs did before they were each wrapped by hand.
+local function HandleSlashCommand(msg)
+    -- Nicknames need their original casing preserved, so keep a raw copy
+    -- alongside the lowercased one used for command matching.
+    local raw   = strtrim(msg)
+    local lower = raw:lower()
+
+    if lower == "lb" or lower == "leaderboard" then
         GW.PrintLeaderboard()
-    elseif msg == "streak" then
-        local s = GuildWordleDB.streak
+    elseif lower == "streak" then
+        local s = GW.CurrentStreak()
         if s.current > 0 then
             print(string.format("|cffFFD700[GuildWordle]|r Current streak: %d day%s (best: %d)",
                 s.current, s.current == 1 and "" or "s", s.best))
         else
             print(string.format("|cffFFD700[GuildWordle]|r No active streak (best: %d)", s.best))
         end
-    elseif msg == "reset" then
+    elseif lower == "nick" then
+        GW.SetNickname("")
+    elseif lower:sub(1,5) == "nick " then
+        GW.SetNickname(raw:sub(6))
+    elseif lower == "reset" then
         GW.ResetGame()
+    elseif lower == "reset-leaderboard" then
+        GW.ResetLeaderboard()
+    --@debug@
+    -- Developer-only. The packager strips everything between these markers
+    -- when building a release, so /wordle dev simply isn't a command in
+    -- published builds — it falls through to the window toggle below like
+    -- any other unrecognised argument. Kept when running from a source
+    -- checkout, which is how this addon is developed.
+    elseif lower == "dev" then
+        local on = not GuildWordleDB.settings.devMode
+        GuildWordleDB.settings.devMode = on
+        -- Dev mode turns on error visibility (below) and reveals the Dev
+        -- button on the main window; the button, not this command, opens the
+        -- testing panel. Turning dev mode off closes the panel, since the
+        -- button that would reopen it is about to disappear. Both calls are
+        -- guarded: the dev file is optional and can be stripped from a
+        -- packaged build without breaking the addon.
+        if GW.RefreshDevButton then GW.RefreshDevButton() end
+        if not on and GW.SetDevPanelShown then GW.SetDevPanelShown(false) end
+        if on then
+            print("|cffFFD700[GuildWordle]|r Dev mode |cff00ff00ON|r — all Lua errors (any addon) print to chat. Open |cffFFFFFF/wordle|r and click |cffFFFFFFDev|r for the testing panel.")
+        else
+            print("|cffFFD700[GuildWordle]|r Dev mode |cffff4444OFF|r.")
+        end
+    --@end-debug@
     else
         if GuildWordleFrame then
             if GuildWordleFrame:IsShown() then
@@ -530,3 +1018,37 @@ SlashCmdList["GUILDWORDLE"] = function(msg)
         end
     end
 end
+
+SlashCmdList["GUILDWORDLE"] = function(msg)
+    local ok, err = pcall(HandleSlashCommand, msg)
+    if not ok then
+        print("|cffff4444[GuildWordle]|r Command error: " .. tostring(err))
+    end
+end
+
+-- ── Test hooks ───────────────────────────────────────────────────────────────
+-- Exposes otherwise-`local` internals for tests/ only — nothing in the addon
+-- itself ever reads GW._test. See tests/BEHAVIOR_SPEC.md for what each of
+-- these is exercised by; HandleAddonMessage and InitDB in particular can't be
+-- meaningfully tested without this, since they're the addon's highest-risk
+-- code (wire-protocol parsing, SavedVariables bring-up) and aren't reachable
+-- any other way from outside this file.
+GW._test = {
+    InitDB             = InitDB,
+    HandleAddonMessage = HandleAddonMessage,
+    HandleSlashCommand = HandleSlashCommand,
+    EvaluateGuess      = EvaluateGuess,
+    PackResults        = PackResults,
+    GetTodaysWord      = GetTodaysWord,
+    GetDateString      = GetDateString,
+    CharKey            = CharKey,
+    FilterLetters      = FilterLetters,
+    -- Lets a test pin today's word to a specific value without fighting
+    -- GW.CurrentWord()'s own date-based cache invalidation (cachedWordDate
+    -- is a file-local upvalue tests can't otherwise reach) — needed for any
+    -- guess-evaluation test that requires a specific known answer.
+    SetWordForTest = function(word, forDate)
+        GW.todaysWord = word
+        cachedWordDate = forDate or GetDateString()
+    end,
+}
